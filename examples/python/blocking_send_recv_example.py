@@ -16,6 +16,8 @@
 # limitations under the License.
 
 import argparse
+import time
+import numpy as np
 
 import torch
 
@@ -26,7 +28,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip", type=str, required=True)
     parser.add_argument("--port", type=int, default=5555)
-    parser.add_argument("--use_cuda", type=bool, default=False)
+    parser.add_argument("--use_cuda", action="store_true", help="Use CUDA if available")
     parser.add_argument(
         "--mode",
         type=str,
@@ -36,34 +38,40 @@ def parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
-    args = parse_args()
-
-    # initiator use default port
+def run_single_transfer(num_elements, args):
+    """Run a single transfer with specified number of elements - creates fresh agent each time"""
+    
+    # Create fresh agent configuration for each transfer
     listen_port = args.port
     if args.mode != "target":
         listen_port = 0
 
     if args.use_cuda:
-        torch.set_default_device("cuda:0")
-    else:  # To be sure this is the default
+        try:
+            if torch.cuda.is_available():
+                torch.set_default_device("cuda:0")
+            else:
+                torch.set_default_device("cpu")
+        except Exception as e:
+            torch.set_default_device("cpu")
+    else:
         torch.set_default_device("cpu")
 
     config = nixl_agent_config(True, True, listen_port)
-
-    # Allocate memory and register with NIXL
     agent = nixl_agent(args.mode, config)
+    
+    # Create tensors of specified size
     if args.mode == "target":
-        tensors = [torch.ones(10, dtype=torch.float32) for _ in range(2)]
+        tensors = [torch.ones(num_elements, dtype=torch.float32) for _ in range(2)]
     else:
-        tensors = [torch.zeros(10, dtype=torch.float32) for _ in range(2)]
-
-    print(f"{args.mode} Tensors: {tensors}")
+        tensors = [torch.zeros(num_elements, dtype=torch.float32) for _ in range(2)]
 
     reg_descs = agent.register_memory(tensors)
     if not reg_descs:  # Same as reg_descs if successful
         print("Memory registration failed.")
-        exit()
+        return None
+
+    bandwidth = None
 
     # Target code
     if args.mode == "target":
@@ -78,17 +86,11 @@ if __name__ == "__main__":
 
         agent.send_notif("initiator", target_desc_str)
 
-        print("Waiting for transfer")
-
         # Waiting for transfer
-        # For now the notification is just UUID, could be any python bytes.
-        # Also can have more than UUID, and check_remote_xfer_done returns
-        # the full python bytes, here it would be just UUID.
         while not agent.check_remote_xfer_done("initiator", b"UUID"):
             continue
     # Initiator code
     else:
-        print("Initiator sending to " + args.ip)
         agent.fetch_remote_metadata("target", args.ip, args.port)
         agent.send_local_metadata(args.ip, args.port)
 
@@ -105,40 +107,108 @@ if __name__ == "__main__":
         while not ready:
             ready = agent.check_remote_metadata("target")
 
-        print("Ready for transfer")
+        start_time = time.time()
 
         xfer_handle = agent.initialize_xfer(
-            "READ", initiator_descs, target_descs, "target", "UUID"
+            "READ", initiator_descs, target_descs, "target", b"UUID"
         )
 
         if not xfer_handle:
             print("Creating transfer failed.")
-            exit()
+            agent.deregister_memory(reg_descs)
+            return None
 
         state = agent.transfer(xfer_handle)
         if state == "ERR":
             print("Posting transfer failed.")
-            exit()
+            agent.deregister_memory(reg_descs)
+            return None
         while True:
             state = agent.check_xfer_state(xfer_handle)
             if state == "ERR":
                 print("Transfer got to Error state.")
-                exit()
+                agent.deregister_memory(reg_descs)
+                return None
             elif state == "DONE":
                 break
 
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        # Calculate bandwidth in GB/s
+        size_bytes = num_elements * 4 * 2  # 4 bytes per float32, 2 tensors
+        bandwidth = (size_bytes / duration) / (1024 * 1024 * 1024)
+
         # Verify data after read
         for i, tensor in enumerate(tensors):
-            if not torch.allclose(tensor, torch.ones(10)):
+            if not torch.allclose(tensor, torch.ones(num_elements)):
                 print(f"Data verification failed for tensor {i}.")
-                exit()
-        print(f"{args.mode} Data verification passed - {tensors}")
+                agent.deregister_memory(reg_descs)
+                return None
 
-    if args.mode != "target":
-        agent.remove_remote_agent("target")
         agent.release_xfer_handle(xfer_handle)
+        agent.remove_remote_agent("target")
         agent.invalidate_local_metadata(args.ip, args.port)
 
     agent.deregister_memory(reg_descs)
+    return bandwidth
 
-    print("Test Complete.")
+
+# TPU0: python blocking_send_recv_example.py --ip 10.202.15.196 --port 12345 --mode initiator
+# TPU1: python blocking_send_recv_example.py --ip 10.202.15.196 --port 12345 --mode target
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    # Test sizes: number of float32 elements per tensor
+    # Starting from 2K elements (8KB per tensor, 16KB total) to 256M elements (1GB per tensor, 2GB total)
+    element_counts = [2**i * 1024 for i in range(18)]  # 2K to 256M elements
+    bandwidths = []
+
+    if args.mode == "initiator":
+        print("\nElements\tSize(MB)\tBandwidth(GB/s)")
+        print("-" * 40)
+    
+    results = [[] for _ in range(3)]
+    for num_elements in element_counts:
+        bandwidth = run_single_transfer(num_elements, args)
+        
+        if args.mode == "initiator":
+            size_mb = (num_elements * 4 * 2) / (1024 * 1024)  # 4 bytes per float32, 2 tensors
+            if bandwidth is not None:
+                print(f"{num_elements}\t\t{size_mb:.2f}\t\t{bandwidth:.2f}")
+                bandwidths.append(bandwidth)
+                results[0].append(num_elements)
+                results[1].append(size_mb)
+                results[2].append(bandwidth)
+            else:
+                print(f"{num_elements}\t\t{size_mb:.2f}\t\tFailed")
+                break  # Stop on first failure
+
+    # Final summary
+    if args.mode == "initiator" and bandwidths:
+        print(f"\nAverage Bandwidth: {np.mean(bandwidths):.2f} GB/s")
+        print(f"Peak Bandwidth: {np.max(bandwidths):.2f} GB/s")
+
+    # Print detailed results
+    if args.mode == "initiator" and results[0]:
+        print("\nDetailed Results:")
+        print(f"{'Elements':<12} {'Size(MB)':<10} {'Bandwidth(GB/s)':<15}")
+        print("-" * 40)
+        for elems, size, bw in zip(results[0], results[1], results[2]):
+            print(f"{elems:<12,} {size:<10.2f} {bw:<15.2f}")
+
+    # Plot bandwidth results
+    if args.mode == "initiator" and results[1]:
+        import matplotlib.pyplot as plt
+        
+        plt.figure(figsize=(10, 6))
+        plt.semilogx(results[1], results[2], marker='o')
+        plt.xlabel('Data Size (MB)')
+        plt.ylabel('Bandwidth (GB/s)') 
+        plt.title('NIXL Transfer Bandwidth vs Data Size')
+        plt.grid(True)
+        plt.savefig('bandwidth_plot.png')
+        plt.close()
+
+    print("Benchmark Complete.")
