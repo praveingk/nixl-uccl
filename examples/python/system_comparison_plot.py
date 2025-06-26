@@ -54,6 +54,9 @@ plt.semilogx(msg_sizes_mb, nccl_sendrecv, marker='o', label='NCCL')
 # plt.semilogx(msg_sizes_mb, ucx_perftest, marker='^', label='UCX_perftest')
 plt.semilogx(msg_sizes_mb, nixl_perftest, marker='^', label='NIXL')
 
+# Draw a red dotted curve at 50 GB/s
+plt.axhline(y=50, color='red', linestyle='--', label='Line Rate')
+
 plt.xlabel('Message Size (MB)')
 plt.ylabel('Throughput (GB/s)')
 # plt.title('Bandwidth vs Message Size')
