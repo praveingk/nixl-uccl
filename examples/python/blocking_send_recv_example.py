@@ -59,12 +59,23 @@ def run_single_transfer(num_elements, args):
 
     config = nixl_agent_config(True, True, listen_port)
     agent = nixl_agent(args.mode, config)
+    plugin_list = agent.get_plugin_list()
+    print(plugin_list)
+    print("Plugin parameters")
+    print(agent.get_plugin_mem_types("UCX"))
+    print(agent.get_plugin_params("UCX"))
+
+    print("\nLoaded backend parameters")
+    print(agent.get_backend_mem_types("UCX"))
+    print(agent.get_backend_params("UCX"))
+    print()
+    
     
     # Create tensors of specified size
     if args.mode == "target":
-        tensors = [torch.ones(num_elements, dtype=torch.float32) for _ in range(2)]
-    else:
         tensors = [torch.zeros(num_elements, dtype=torch.float32) for _ in range(2)]
+    else:
+        tensors = [torch.ones(num_elements, dtype=torch.float32) for _ in range(2)]
 
     reg_descs = agent.register_memory(tensors)
     if not reg_descs:  # Same as reg_descs if successful
@@ -108,9 +119,9 @@ def run_single_transfer(num_elements, args):
             ready = agent.check_remote_metadata("target")
 
         start_time = time.time()
-
+    
         xfer_handle = agent.initialize_xfer(
-            "READ", initiator_descs, target_descs, "target", b"UUID"
+            "WRITE", initiator_descs, target_descs, "target", b"UUID"
         )
 
         if not xfer_handle:
@@ -141,7 +152,8 @@ def run_single_transfer(num_elements, args):
 
         # Verify data after read
         for i, tensor in enumerate(tensors):
-            if not torch.allclose(tensor, torch.ones(num_elements)):
+            # if not torch.allclose(tensor, torch.ones(num_elements)):
+            if args.mode == "target" and not torch.allclose(tensor, torch.ones(num_elements)):
                 print(f"Data verification failed for tensor {i}.")
                 agent.deregister_memory(reg_descs)
                 return None
@@ -160,9 +172,23 @@ def run_single_transfer(num_elements, args):
 if __name__ == "__main__":
     args = parse_args()
 
+    msg_sizes_bytes = [
+        1 * 1024,          # 1 KB
+        4 * 1024,          # 4 KB
+        16 * 1024,         # 16 KB
+        64 * 1024,         # 64 KB
+        256 * 1024,        # 256 KB
+        1 * 1024 * 1024,   # 1  MB
+        10 * 1024 * 1024,  # 10 MB
+        100 * 1024 * 1024  # 100 MB
+    ]
+
+    # elements per tensor for each size  (size_bytes / (4 bytes/elem * 2 tensors))
+    element_counts = [size // 8 for size in msg_sizes_bytes]
+
     # Test sizes: number of float32 elements per tensor
     # Starting from 2K elements (8KB per tensor, 16KB total) to 256M elements (1GB per tensor, 2GB total)
-    element_counts = [2**i * 1024 for i in range(18)]  # 2K to 256M elements
+    # element_counts = [2**i * 1024 for i in range(18)]  # 2K to 256M elements
     bandwidths = []
 
     if args.mode == "initiator":
