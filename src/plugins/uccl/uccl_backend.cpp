@@ -51,13 +51,13 @@ nixl_status_t nixlUcclEngine::getPublicData(const nixlBackendMD* meta, std::stri
 
 nixl_status_t nixlUcclEngine::getConnInfo(std::string &str) const {
     if (!engine_) {
-        return NIXL_ERROR;
+        return NIXL_ERR_BACKEND;
     }
     
     char* metadata = nullptr;
     int result = uccl_engine_get_metadata(engine_, &metadata);
     if (result != 0 || !metadata) {
-        return NIXL_ERROR;
+        return NIXL_ERR_BACKEND;
     }
     
     str = std::string(metadata);
@@ -93,11 +93,11 @@ nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_me
     std::lock_guard<std::mutex> lock(mutex_);
     if (mem_reg_info_.count(mem.addr)) {
         auto priv = mem_reg_info_[mem.addr];
+        std::cout << "Registering memory: "<<mem.addr<<" ref_cnt: "<<priv->ref_cnt<< std::endl;
         priv->ref_cnt++;
         out = priv;
         return NIXL_SUCCESS;
     }
-    std::cout << "Registering memory: "<<mem.addr<<" ref_cnt: "<<priv->ref_cnt<< std::endl;
     return NIXL_SUCCESS;
 }
 
@@ -137,7 +137,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
 
 nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
     // TODO: Use Endpoint to perform send/recv based on operation
-    // For now, just return success
+    // For now, just return success 
     return NIXL_SUCCESS;
 }
 
