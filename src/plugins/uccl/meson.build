@@ -19,8 +19,8 @@ uccl_lib = cpp.find_library('uccl_engine')
 compile_flags = []
 
 
-if 'uccl' in static_plugins
-    uccl_backend_lib = static_library('uccl',
+if 'Uccl' in static_plugins
+    uccl_backend_lib = static_library('Uccl',
                'uccl_backend.cpp', 'uccl_backend.h', 'uccl_plugin.cpp',
                dependencies: [nixl_infra, serdes_interface, cuda_dep, uccl_lib],
                include_directories: nixl_inc_dirs,
@@ -28,7 +28,7 @@ if 'uccl' in static_plugins
                cpp_args : compile_flags,
                name_prefix: 'libplugin_')  # Custom prefix for plugin libraries
 else
-    uccl_backend_lib = shared_library('uccl',
+    uccl_backend_lib = shared_library('Uccl',
                'uccl_backend.cpp', 'uccl_backend.h', 'uccl_plugin.cpp',
                dependencies: [nixl_infra, serdes_interface, cuda_dep, uccl_lib],
                include_directories: [nixl_inc_dirs, utils_inc_dirs],

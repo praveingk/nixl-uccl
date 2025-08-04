@@ -19,6 +19,47 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <sys/socket.h>
+#include <unistd.h>
+
+// Helper function to parse connection string in format: ip_addr:port?gpu_index
+bool parseConnectionString(const std::string& conn_str, char*& ip_addr, int& port, int& gpu_index) {
+    // Exit with errror if neither : or ? is found in conn_str
+    size_t colon_pos = conn_str.find(':');
+    if (colon_pos == std::string::npos) {
+        std::cerr << "Invalid connection string format: missing colon separator" << std::endl;
+        return false;
+    }
+    size_t question_pos = conn_str.find('?', colon_pos);
+    if (question_pos == std::string::npos) {
+        std::cerr << "Invalid connection string format: missing question mark separator" << std::endl;
+        return false;
+    }
+
+    std::string ip_str = conn_str.substr(0, colon_pos);
+    ip_addr = new char[ip_str.length() + 1];
+    strcpy(ip_addr, ip_str.c_str());
+
+    std::string port_str = conn_str.substr(colon_pos + 1, question_pos - colon_pos - 1);
+    try {
+        port = std::stoi(port_str);
+    } catch (const std::exception& e) {
+        std::cerr << "Invalid port number: " << port_str << std::endl;
+        delete[] ip_addr;
+        return false;
+    }
+
+    std::string gpu_str = conn_str.substr(question_pos + 1);
+    try {
+        gpu_index = std::stoi(gpu_str);
+    } catch (const std::exception& e) {
+        std::cerr << "Invalid GPU index: " << gpu_str << std::endl;
+        delete[] ip_addr;
+        return false;
+    }
+
+    return true;
+}
 
 nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
     : nixlBackendEngine(init_params) {
@@ -53,34 +94,79 @@ nixl_status_t nixlUcclEngine::getConnInfo(std::string &str) const {
     if (!engine_) {
         return NIXL_ERR_BACKEND;
     }
-    
+
     char* metadata = nullptr;
     int result = uccl_engine_get_metadata(engine_, &metadata);
     if (result != 0 || !metadata) {
         return NIXL_ERR_BACKEND;
     }
-    
+
     str = std::string(metadata);
     delete[] metadata;
     std::cout << "UCCL engine metadata: " << str << std::endl;
     return NIXL_SUCCESS;
 }
-
+#define MAX_RETRIES 100
 
 nixl_status_t nixlUcclEngine::loadRemoteConnInfo(const std::string &remote_agent, const std::string &remote_conn_info) {
-    // TODO: Parse remote_conn_info and establish connection using Endpoint
-    // For now, just store a dummy conn_id
+    // Parse remote_conn_info and establish connection using UCCL engine
     std::cout << "UCCL engine remote_agent: "<<remote_agent<<" loadRemoteConnInfo: " << remote_conn_info << std::endl;
     std::lock_guard<std::mutex> lock(mutex_);
-    connected_agents_[remote_agent] = 0; // Placeholder conn_id
+
+    char* ip_addr = nullptr;
+    int port = 0;
+    int gpu_index = 0;
+
+    if (!parseConnectionString(remote_conn_info, ip_addr, port, gpu_index)) {
+        return NIXL_ERR_BACKEND;
+    }
+
+    // Simple role coordination: agent with smaller name acts as client
+    is_client_ = local_agent_name_ < remote_agent;
+    uccl_conn_t *conn = nullptr;
+    int tries = 0;
+    
+    if (is_client_) {
+        // Act as client - connect to remote endpoint
+        std::cout << "Acting as CLIENT, connecting to " << ip_addr << ":" << port << "?gpu=" << gpu_index << std::endl;
+        do {
+            conn = uccl_engine_connect(engine_, ip_addr, gpu_index, port);
+            tries++;
+            if (!conn && tries < MAX_RETRIES) {
+
+            }
+        } while(!conn && tries < MAX_RETRIES);
+
+        if (!conn) {
+            std::cerr << "Failed to connect to remote agent " << remote_agent << " after " << MAX_RETRIES << " attempts" << std::endl;
+            delete[] ip_addr;
+            return NIXL_ERR_BACKEND;
+        }
+    } else {
+        // Act as server - accept incoming connection
+        std::cout << "Acting as SERVER, accepting connection from " << ip_addr << ":" << port << "?gpu=" << gpu_index << std::endl;
+        char ip_buf[256];
+        int remote_gpu_idx;
+        conn = uccl_engine_accept(engine_, ip_buf, sizeof(ip_buf), &remote_gpu_idx);
+        if (!conn) {
+            std::cerr << "Failed to accept connection from remote agent " << remote_agent << std::endl;
+            delete[] ip_addr;
+            return NIXL_ERR_BACKEND;
+        }
+    }
+    std::cout << "Successfully connected to remote agent " << remote_agent << std::endl;
+    // Start the listener thread for receiving metadata during postXfer
+    uccl_engine_start_listener(conn);
+
+    connected_agents_[remote_agent] = reinterpret_cast<uint64_t>(conn);
+
+    delete[] ip_addr;
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::connect(const std::string &remote_agent) {
-    // TODO: Actually connect to remote agent using Endpoint
-    // For now, assume connection is always successful
+    // Unused 
     std::cout << "Connecting to remote_agent: "<<remote_agent<< std::endl;
-
     return NIXL_SUCCESS;
 }
 
@@ -98,6 +184,23 @@ nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_me
         out = priv;
         return NIXL_SUCCESS;
     }
+    
+    // Register memory with UCCL engine
+    uccl_mr_t* mr = uccl_engine_reg(engine_, mem.addr, mem.len);
+    if (!mr) {
+        std::cerr << "Failed to register memory with UCCL engine" << std::endl;
+        return NIXL_ERR_BACKEND;
+    }
+    
+    auto priv = new nixlUcclBackendMD(true);
+    priv->addr = (void *) mem.addr;
+    priv->length = mem.len;
+    priv->ref_cnt = 1;
+    priv->mr_id = reinterpret_cast<uint64_t>(mr); // Store the memory region handle
+    out = priv;
+    mem_reg_info_[mem.addr] = priv;
+    std::cout << "Registering memory: "<<mem.addr<<" ref_cnt: "<<priv->ref_cnt<<" mr_id: "<<priv->mr_id<< std::endl;
+
     return NIXL_SUCCESS;
 }
 
@@ -106,7 +209,14 @@ nixl_status_t nixlUcclEngine::deregisterMem(nixlBackendMD* meta) {
     auto priv = static_cast<nixlUcclBackendMD*>(meta);
     priv->ref_cnt--;
     if (priv->ref_cnt > 0) return NIXL_SUCCESS;
-    // TODO: Deregister memory from UCCL Endpoint if needed
+    
+    // Deregister memory from UCCL engine
+    if (priv->mr_id != 0) {
+        uccl_mr_t* mr = reinterpret_cast<uccl_mr_t*>(priv->mr_id);
+        uccl_engine_mr_destroy(mr);
+        std::cout << "Deregistered memory: "<<priv->addr<<" mr_id: "<<priv->mr_id<< std::endl;
+    }
+    
     mem_reg_info_.erase((uint64_t)priv->addr);
     delete priv;
     return NIXL_SUCCESS;
@@ -115,12 +225,17 @@ nixl_status_t nixlUcclEngine::deregisterMem(nixlBackendMD* meta) {
 nixl_status_t nixlUcclEngine::loadLocalMD(nixlBackendMD* input, nixlBackendMD* &output) {
     // No-op for UCCL
     output = nullptr;
+    std::cout << "LoadLocalMD: "<< std::endl;
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::loadRemoteMD(const nixlBlobDesc &input, const nixl_mem_t &nixl_mem, const std::string &remote_agent, nixlBackendMD* &output) {
-    // No-op for UCCL
     output = nullptr;
+    std::cout << "LoadRemoteMD: remote_agent: "<<remote_agent<< std::endl;
+    std::cout << "nixlBlobDesc input - addr: " << input.addr << ", len: " << input.len << std::endl;
+    
+    // Client would be invoking postXfer to perform write/read.
+    
     return NIXL_SUCCESS;
 }
 
@@ -132,21 +247,141 @@ nixl_status_t nixlUcclEngine::unloadMD(nixlBackendMD* input) {
 nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
     // Prepare a transfer handle (not used in this stub)
     handle = nullptr;
+    std::cout << "PrepXfer: "<<operation<<" remote_agent: "<<remote_agent<< std::endl;
+    // Get the connection for this remote agent
+    auto conn_iter = connected_agents_.find(remote_agent);
+    if (conn_iter == connected_agents_.end()) {
+        std::cerr << "No connection found for remote agent: " << remote_agent << std::endl;
+        return NIXL_ERR_BACKEND;
+    }
+    uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_iter->second);
+    if (!conn) {
+        std::cerr << "Invalid connection for remote agent: " << remote_agent << std::endl;
+        return NIXL_ERR_BACKEND;
+    }
+    
+    size_t lcnt = local.descCount();
+    size_t rcnt = remote.descCount();
+    
+    if (lcnt != rcnt) {
+        std::cerr << "Local and remote descriptor counts don't match: " << lcnt << " != " << rcnt << std::endl;
+        return NIXL_ERR_INVALID_PARAM;
+    }
+    
+    for (size_t i = 0; i < lcnt; i++) {
+        void* laddr = (void*)local[i].addr;
+        size_t lsize = local[i].len;
+        void* raddr = (void*)remote[i].addr;
+        size_t rsize = remote[i].len;
+        
+        std::cout << "Local address: " << laddr << " size: " << lsize << " Remote address: " << raddr << " size: " << rsize << std::endl;
+        // Send the memory region metadata to the remote agent
+        // TODO: Send other params too
+        metadata_t md = metadata_t{
+            .data_ptr = (uint64_t)laddr,
+            .data_size = lsize
+        };
+        int sock_fd = uccl_engine_get_sock_fd(conn);
+        // Send the message to receiver of where to receive the upcoming data
+        if (sock_fd >= 0) {
+            send(sock_fd, &md, sizeof(metadata_t), 0);
+        }
+    }
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
-    // TODO: Use Endpoint to perform send/recv based on operation
-    // For now, just return success 
+    std::cout << "PostXfer: "<<operation<<" remote_agent: "<<remote_agent<< std::endl;
+    
+    // Get the connection for this remote agent
+    auto conn_iter = connected_agents_.find(remote_agent);
+    if (conn_iter == connected_agents_.end()) {
+        std::cerr << "No connection found for remote agent: " << remote_agent << std::endl;
+        return NIXL_ERR_BACKEND;
+    }
+    
+    uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_iter->second);
+    if (!conn) {
+        std::cerr << "Invalid connection for remote agent: " << remote_agent << std::endl;
+        return NIXL_ERR_BACKEND;
+    }
+    
+    size_t lcnt = local.descCount();
+    size_t rcnt = remote.descCount();
+    
+    if (lcnt != rcnt) {
+        std::cerr << "Local and remote descriptor counts don't match: " << lcnt << " != " << rcnt << std::endl;
+        return NIXL_ERR_INVALID_PARAM;
+    }
+    
+    // Process each descriptor pair
+    for (size_t i = 0; i < lcnt; i++) {
+        void* laddr = (void*)local[i].addr;
+        size_t lsize = local[i].len;
+        void* raddr = (void*)remote[i].addr;
+        size_t rsize = remote[i].len;
+        
+        std::cout << "Local address: " << laddr << " size: " << lsize << " Remote address: " << raddr << " size: " << rsize << std::endl;
+        //send the memory region metadata to the remote agent
+
+        if (lsize != rsize) {
+            std::cerr << "Local and remote sizes don't match: " << lsize << " != " << rsize << std::endl;
+            return NIXL_ERR_INVALID_PARAM;
+        }
+        
+        // Get local memory region
+        auto local_mem_iter = mem_reg_info_.find(local[i].addr);
+        if (local_mem_iter == mem_reg_info_.end()) {
+            std::cerr << "Local memory not registered for address: " << local[i].addr << std::endl;
+            return NIXL_ERR_BACKEND;
+        }
+        
+        auto local_priv = local_mem_iter->second;
+        if (local_priv->mr_id == 0) {
+            std::cerr << "Local memory region not properly registered" << std::endl;
+            return NIXL_ERR_BACKEND;
+        }
+        
+        uccl_mr_t* local_mr = reinterpret_cast<uccl_mr_t*>(local_priv->mr_id);
+        
+        int result = 0;
+        
+        switch (operation) {
+        case NIXL_READ:
+            std::cout << "Performing READ operation: receiving " << lsize << " bytes" << std::endl;
+            result = uccl_engine_recv(conn, local_mr, laddr, lsize);
+            break;
+            
+        case NIXL_WRITE:
+            std::cout << "Performing WRITE operation: sending " << lsize << " bytes" << std::endl;
+            result = uccl_engine_send(conn, local_mr, laddr, lsize);
+            break;
+            
+        default:
+            std::cerr << "Unsupported operation type: " << operation << std::endl;
+            return NIXL_ERR_INVALID_PARAM;
+        }
+        
+        if (result != 0) {
+            std::cerr << "UCCL operation failed with result: " << result << std::endl;
+            return NIXL_ERR_BACKEND;
+        }
+        
+        std::cout << "Successfully completed " << (operation == NIXL_READ ? "READ" : "WRITE") 
+                  << " operation: " << lsize << " bytes" << std::endl;
+    }
+    
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::checkXfer(nixlBackendReqH* handle) const {
     // TODO: Check transfer status if async
+    std::cout << "CheckXfer: "<< std::endl;
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::releaseReqH(nixlBackendReqH* handle) const {
-    // TODO: Release any resources associated with the transfer handle
+    // TODO: Release any resources associated with the transfer handle  
+    std::cout << "ReleaseReqH: "<< std::endl;
     return NIXL_SUCCESS;
 } 

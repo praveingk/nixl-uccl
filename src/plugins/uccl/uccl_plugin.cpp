@@ -19,7 +19,7 @@
 #include "uccl_backend.h"
 
 // Plugin version information
-static const char* PLUGIN_NAME = "UCCL";
+static const char* PLUGIN_NAME = "Uccl";
 static const char* PLUGIN_VERSION = "0.1.0";
 
 // Function to create a new UCCL backend engine instance

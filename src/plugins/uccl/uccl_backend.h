@@ -44,7 +44,6 @@ public:
     nixl_status_t getPublicData(const nixlBackendMD* meta,
         std::string &str) const;
     nixl_status_t getConnInfo(std::string &str) const;
-    nixl_status_t getEndpointMetadata(std::string &metadata_str) const;
     nixl_status_t loadRemoteConnInfo(const std::string &remote_agent,
         const std::string &remote_conn_info);
 
@@ -85,6 +84,7 @@ public:
 private:
     mutable std::mutex mutex_;
     uccl_engine_t* engine_; 
+    bool is_client_;
     std::string local_agent_name_;
     std::unordered_map<uint64_t, nixlUcclBackendMD *> mem_reg_info_;
     std::unordered_map<std::string, uint64_t> connected_agents_; // agent name -> conn_id
