@@ -71,6 +71,15 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
 }
 
 nixlUcclEngine::~nixlUcclEngine() {
+    for (auto& [agent_name, conn_id] : connected_agents_) {
+        uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_id);
+        if (conn) {
+            std::cout << "Disconnecting from agent: " << agent_name << std::endl;
+            uccl_engine_conn_destroy(conn);
+        }
+    }
+    
+    connected_agents_.clear();
     if (engine_) {
         uccl_engine_destroy(engine_);
         engine_ = nullptr;
@@ -278,8 +287,8 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         // Send the memory region metadata to the remote agent
         // TODO: Send other params too
         metadata_t md = metadata_t{
-            .data_ptr = (uint64_t)laddr,
-            .data_size = lsize
+            .data_ptr = (uint64_t)raddr,
+            .data_size = rsize
         };
         int sock_fd = uccl_engine_get_sock_fd(conn);
         // Send the message to receiver of where to receive the upcoming data
