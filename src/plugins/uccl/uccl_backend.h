@@ -24,6 +24,7 @@
 
 #include "nixl.h"
 #include "backend/backend_engine.h"
+#include "common/nixl_log.h"
 
 #include "uccl_engine.h"
 
@@ -99,6 +100,15 @@ public:
     size_t length;
     int ref_cnt;
     uint64_t mr_id; // UCCL memory region id
+};
+
+// Custom request handle for UCCL transfers
+class nixlUcclReqH : public nixlBackendReqH {
+public:
+    nixlUcclReqH(uccl_conn_t* conn) : conn(conn) {}
+    virtual ~nixlUcclReqH() {}
+    uccl_conn_t* conn;
+    std::vector<uint64_t> transfer_ids;
 };
 
 #endif 

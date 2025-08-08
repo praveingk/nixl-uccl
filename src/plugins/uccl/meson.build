@@ -22,7 +22,7 @@ compile_flags = []
 if 'Uccl' in static_plugins
     uccl_backend_lib = static_library('Uccl',
                'uccl_backend.cpp', 'uccl_backend.h', 'uccl_plugin.cpp',
-               dependencies: [nixl_infra, serdes_interface, cuda_dep, uccl_lib],
+               dependencies: [nixl_infra, serdes_interface, cuda_dep, uccl_lib, nixl_common_dep],
                include_directories: nixl_inc_dirs,
                install: false,
                cpp_args : compile_flags,
@@ -30,7 +30,7 @@ if 'Uccl' in static_plugins
 else
     uccl_backend_lib = shared_library('Uccl',
                'uccl_backend.cpp', 'uccl_backend.h', 'uccl_plugin.cpp',
-               dependencies: [nixl_infra, serdes_interface, cuda_dep, uccl_lib],
+               dependencies: [nixl_infra, serdes_interface, cuda_dep, uccl_lib, nixl_common_dep],
                include_directories: [nixl_inc_dirs, utils_inc_dirs],
                install: true,
                cpp_args : compile_flags + ['-fPIC'],
