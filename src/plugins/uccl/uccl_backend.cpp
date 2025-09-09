@@ -67,8 +67,8 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
     : nixlBackendEngine(init_params) {
     local_agent_name_ = init_params->localAgent;
     // TODO: Initialize UCCL engine with appropriate GPU index and CPU count
-    // For now, use dummy values (0, 1). But extend it to all devices
-    engine_ = uccl_engine_create(0, 1);
+    // For now, use fixed values (0, 4). But extend it to all devices
+    engine_ = uccl_engine_create(0, 4);
     NIXL_DEBUG << "UCCL engine created";
 }
 
@@ -270,7 +270,8 @@ nixl_status_t nixlUcclEngine::unloadMD(nixlBackendMD* input) {
 }
 
 nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
-    // Prepare a transfer handle (not used in this stub)
+    int result = 0;
+
     handle = nullptr;
     NIXL_DEBUG << "PrepXfer: "<<operation<<" remote_agent: "<<remote_agent;
     // Get the connection for this remote agent
@@ -300,6 +301,18 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         size_t rsize = remote[i].len;
         
         NIXL_DEBUG << "Local address: " << laddr << " size: " << lsize << " Remote address: " << raddr << " size: " << rsize;
+
+        auto local_mem_iter = mem_reg_info_.find(local[i].addr);
+        if (local_mem_iter == mem_reg_info_.end()) {
+            NIXL_ERROR << "Local memory not registered for address: " << local[i].addr;
+            return NIXL_ERR_BACKEND;
+        }
+
+        auto local_priv = local_mem_iter->second;
+        if (local_priv->mr_id == 0) {
+            NIXL_ERROR << "Local memory region not properly registered";
+            return NIXL_ERR_BACKEND;
+        }
         // Send the memory region metadata to the remote agent
         // TODO: Send other params too
         metadata_t md = metadata_t{
@@ -320,22 +333,28 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
             send(sock_fd, &md, sizeof(metadata_t), 0);
         }
 
-        // if (operation == NIXL_READ) {
-        //     char fifo_data[FIFO_ITEM_SIZE];            
-        //     ssize_t result = recv(sock_fd, fifo_data, FIFO_ITEM_SIZE, 0);
-        //     if (result < 0) {
-        //         NIXL_ERROR << "Failed to receive FifoItem data: " << strerror(errno);
-        //         break;
-        //     }
-        //     auto local_mem_iter = mem_reg_info_.find(local[i].addr);
-        //     if (local_mem_iter != mem_reg_info_.end()) {
-        //         auto priv = local_mem_iter->second;
-        //         memcpy(priv->fifo_item_data, fifo_data, 64);
-        //         NIXL_DEBUG << "Stored FifoItem data for memory address: " << local[i].addr;
-        //     } else {
-        //         NIXL_ERROR << "Memory not registered for address: " << local[i].addr;
-        //     }
-        // }
+        char fifo_item[FIFO_ITEM_SIZE];
+        int retry_count = 0;
+        const int max_retries = 5;
+        do {
+            result = uccl_engine_get_fifo_item(conn, &fifo_item);
+            if (result == 0) {
+                // Successfully got fifo_item
+                NIXL_DEBUG << "Got the FIFO item to perform read operation";
+                memcpy(local_priv->fifo_item_data, fifo_item, FIFO_ITEM_SIZE);
+                break;
+            }
+            retry_count++;
+            if (retry_count < max_retries) {
+                NIXL_DEBUG << "Failed to get FIFO item, retry " << retry_count << "/" << max_retries;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } while (retry_count < max_retries);
+
+        if (result != 0) {
+            NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries";
+            return NIXL_ERR_BACKEND;
+        }
     }
     return NIXL_SUCCESS;
 }
@@ -382,7 +401,7 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         // Get local memory region
         auto local_mem_iter = mem_reg_info_.find(local[i].addr);
         if (local_mem_iter == mem_reg_info_.end()) {
-            NIXL_ERROR << "Local memory not registered for address: " << local[i].addr;
+            NIXL_ERROR << "Local memory not registered for address: " << laddr;
             return NIXL_ERR_BACKEND;
         }
 
@@ -400,28 +419,7 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         case NIXL_READ: 
         {
             NIXL_DEBUG << "Performing READ operation: receiving " << lsize << " bytes";
-            char fifo_item[FIFO_ITEM_SIZE];
-            int retry_count = 0;
-            const int max_retries = 5;
-            do {
-                result = uccl_engine_get_fifo_item(conn, &fifo_item);
-                if (result == 0) {
-                    // Successfully got fifo_item
-                    NIXL_DEBUG << "Got the FIFO item to perform read operation";
-                    break;
-                }
-                retry_count++;
-                if (retry_count < max_retries) {
-                    NIXL_DEBUG << "Failed to get FIFO item, retry " << retry_count << "/" << max_retries;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Small delay before retry
-                }
-            } while (retry_count < max_retries);
-            
-            if (result != 0) {
-                NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries";
-                return NIXL_ERR_BACKEND;
-            }
-            result = uccl_engine_read(conn, local_mr, laddr, lsize, fifo_item, &transfer_id);
+            result = uccl_engine_read(conn, local_mr, laddr, lsize, local_priv->fifo_item_data, &transfer_id);
             break;
         }
         case NIXL_WRITE:

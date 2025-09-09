@@ -102,6 +102,7 @@ public:
     size_t length;
     int ref_cnt;
     uint64_t mr_id; // UCCL memory region id
+    char fifo_item_data[FIFO_ITEM_SIZE];
 };
 
 // Custom request handle for UCCL transfers
