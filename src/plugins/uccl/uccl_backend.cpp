@@ -397,7 +397,8 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         int result = 0;
         uint64_t transfer_id = 0; 
         switch (operation) {
-        case NIXL_READ:
+        case NIXL_READ: 
+        {
             NIXL_DEBUG << "Performing READ operation: receiving " << lsize << " bytes";
             char fifo_item[FIFO_ITEM_SIZE];
             int retry_count = 0;
@@ -422,7 +423,7 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
             }
             result = uccl_engine_read(conn, local_mr, laddr, lsize, fifo_item, &transfer_id);
             break;
-
+        }
         case NIXL_WRITE:
             NIXL_DEBUG << "Performing WRITE operation: sending " << lsize << " bytes";
             result = uccl_engine_write(conn, local_mr, laddr, lsize, &transfer_id);
