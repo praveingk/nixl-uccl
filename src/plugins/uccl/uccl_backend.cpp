@@ -21,6 +21,8 @@
 #include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <chrono>
+#include <thread>
 
 // Parse connection string in format: ip_addr:port?gpu_index
 bool parseConnectionString(const std::string& conn_str, char*& ip_addr, int& port, int& gpu_index) {
@@ -71,16 +73,33 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
 }
 
 nixlUcclEngine::~nixlUcclEngine() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [addr, priv] : mem_reg_info_) {
+            if (priv && priv->mr_id != 0) {
+                uccl_mr_t* mr = reinterpret_cast<uccl_mr_t*>(priv->mr_id);
+                if (mr) {
+                    uccl_engine_mr_destroy(mr);
+                    NIXL_DEBUG << "Deregistered memory during cleanup: " << addr << " mr_id: " << priv->mr_id;
+                }
+            }
+            delete priv;
+        }
+        mem_reg_info_.clear();
+    }
     for (auto& [agent_name, conn_id] : connected_agents_) {
         uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_id);
         if (conn) {
             NIXL_DEBUG << "Disconnecting from agent: " << agent_name;
+            // Stop listener thread before destroying connection
             uccl_engine_conn_destroy(conn);
         }
     }
     
     connected_agents_.clear();
     if (engine_) {
+        // Add a small delay to allow UCCL internal cleanup to complete
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         uccl_engine_destroy(engine_);
         engine_ = nullptr;
     }
@@ -165,7 +184,7 @@ nixl_status_t nixlUcclEngine::loadRemoteConnInfo(const std::string &remote_agent
     }
     NIXL_DEBUG << "Successfully connected to remote agent " << remote_agent;
     // Start the listener thread for receiving metadata during postXfer
-    uccl_engine_start_listener(conn);
+    uccl_engine_start_listener(conn);   
 
     connected_agents_[remote_agent] = reinterpret_cast<uint64_t>(conn);
 
@@ -221,8 +240,11 @@ nixl_status_t nixlUcclEngine::deregisterMem(nixlBackendMD* meta) {
     // Deregister memory from UCCL engine
     if (priv->mr_id != 0) {
         uccl_mr_t* mr = reinterpret_cast<uccl_mr_t*>(priv->mr_id);
-        uccl_engine_mr_destroy(mr);
-        NIXL_DEBUG << "Deregistered memory: "<<priv->addr<<" mr_id: "<<priv->mr_id;
+        if (mr) {
+            uccl_engine_mr_destroy(mr);
+            NIXL_DEBUG << "Deregistered memory: "<<priv->addr<<" mr_id: "<<priv->mr_id;
+        }
+        priv->mr_id = 0;
     }
     
     mem_reg_info_.erase((uint64_t)priv->addr);
@@ -297,6 +319,23 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         if (sock_fd >= 0) {
             send(sock_fd, &md, sizeof(metadata_t), 0);
         }
+
+        // if (operation == NIXL_READ) {
+        //     char fifo_data[FIFO_ITEM_SIZE];            
+        //     ssize_t result = recv(sock_fd, fifo_data, FIFO_ITEM_SIZE, 0);
+        //     if (result < 0) {
+        //         NIXL_ERROR << "Failed to receive FifoItem data: " << strerror(errno);
+        //         break;
+        //     }
+        //     auto local_mem_iter = mem_reg_info_.find(local[i].addr);
+        //     if (local_mem_iter != mem_reg_info_.end()) {
+        //         auto priv = local_mem_iter->second;
+        //         memcpy(priv->fifo_item_data, fifo_data, 64);
+        //         NIXL_DEBUG << "Stored FifoItem data for memory address: " << local[i].addr;
+        //     } else {
+        //         NIXL_ERROR << "Memory not registered for address: " << local[i].addr;
+        //     }
+        // }
     }
     return NIXL_SUCCESS;
 }
@@ -360,8 +399,28 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         switch (operation) {
         case NIXL_READ:
             NIXL_DEBUG << "Performing READ operation: receiving " << lsize << " bytes";
-            // TODO: Handle Read coordination
-            result = uccl_engine_read(conn, local_mr, laddr, lsize, nullptr, &transfer_id);
+            char fifo_item[FIFO_ITEM_SIZE];
+            int retry_count = 0;
+            const int max_retries = 5;
+            do {
+                result = uccl_engine_get_fifo_item(conn, &fifo_item);
+                if (result == 0) {
+                    // Successfully got fifo_item
+                    NIXL_DEBUG << "Got the FIFO item to perform read operation";
+                    break;
+                }
+                retry_count++;
+                if (retry_count < max_retries) {
+                    NIXL_DEBUG << "Failed to get FIFO item, retry " << retry_count << "/" << max_retries;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Small delay before retry
+                }
+            } while (retry_count < max_retries);
+            
+            if (result != 0) {
+                NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries";
+                return NIXL_ERR_BACKEND;
+            }
+            result = uccl_engine_read(conn, local_mr, laddr, lsize, fifo_item, &transfer_id);
             break;
 
         case NIXL_WRITE:

@@ -28,6 +28,8 @@
 
 #include "uccl_engine.h"
 
+#define FIFO_ITEM_SIZE 64
+
 class nixlUcclBackendMD;
 
 class nixlUcclEngine : public nixlBackendEngine {
