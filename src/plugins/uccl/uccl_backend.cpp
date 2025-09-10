@@ -204,6 +204,7 @@ nixl_status_t nixlUcclEngine::disconnect(const std::string &remote_agent) {
 
 nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem, nixlBackendMD* &out) {
     std::lock_guard<std::mutex> lock(mutex_);
+
     if (mem_reg_info_.count(mem.addr)) {
         auto priv = mem_reg_info_[mem.addr];
         NIXL_DEBUG << "Registering memory: "<<mem.addr<<" ref_cnt: "<<priv->ref_cnt;
@@ -226,7 +227,7 @@ nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_me
     priv->mr_id = reinterpret_cast<uint64_t>(mr); // Store the memory region handle
     out = priv;
     mem_reg_info_[mem.addr] = priv;
-    NIXL_DEBUG << "Registering memory: "<<mem.addr<<" ref_cnt: "<<priv->ref_cnt<<" mr_id: "<<priv->mr_id;
+    NIXL_DEBUG << "Registering memory: "<<mem.addr<<"Device: "<<  mem.devId<<" ref_cnt: "<<priv->ref_cnt<<" mr_id: "<<priv->mr_id;
 
     return NIXL_SUCCESS;
 }
@@ -333,27 +334,29 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
             send(sock_fd, &md, sizeof(metadata_t), 0);
         }
 
-        char fifo_item[FIFO_ITEM_SIZE];
-        int retry_count = 0;
-        const int max_retries = 5;
-        do {
-            result = uccl_engine_get_fifo_item(conn, &fifo_item);
-            if (result == 0) {
-                // Successfully got fifo_item
-                NIXL_DEBUG << "Got the FIFO item to perform read operation";
-                memcpy(local_priv->fifo_item_data, fifo_item, FIFO_ITEM_SIZE);
-                break;
-            }
-            retry_count++;
-            if (retry_count < max_retries) {
-                NIXL_DEBUG << "Failed to get FIFO item, retry " << retry_count << "/" << max_retries;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        } while (retry_count < max_retries);
+        if (operation == NIXL_READ) {
+            char fifo_item[FIFO_ITEM_SIZE];
+            int retry_count = 0;
+            const int max_retries = 5;
+            do {
+                result = uccl_engine_get_fifo_item(conn, &fifo_item);
+                if (result == 0) {
+                    // Successfully got fifo_item
+                    NIXL_DEBUG << "Got the FIFO item to perform read operation";
+                    memcpy(local_priv->fifo_item_data, fifo_item, FIFO_ITEM_SIZE);
+                    break;
+                }
+                retry_count++;
+                if (retry_count < max_retries) {
+                    NIXL_DEBUG << "Failed to get FIFO item, retry " << retry_count << "/" << max_retries;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            } while (retry_count < max_retries);
 
-        if (result != 0) {
-            NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries";
-            return NIXL_ERR_BACKEND;
+            if (result != 0) {
+                NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries";
+                return NIXL_ERR_BACKEND;
+            }
         }
     }
     return NIXL_SUCCESS;
