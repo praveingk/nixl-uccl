@@ -26,6 +26,7 @@
 #include <fstream>
 #include <string>
 #include <map>
+#include <dlfcn.h>
 
 using lock_guard = const std::lock_guard<std::mutex>;
 
@@ -170,6 +171,25 @@ void nixlPluginManager::loadPluginsFromList(const std::string& filename) {
     }
 }
 
+namespace {
+static std::string
+getPluginDir() {
+    // Environment variable takes precedence
+    const char *plugin_dir = getenv("NIXL_PLUGIN_DIR");
+    if (plugin_dir) {
+        return plugin_dir;
+    }
+    // By default, use the plugin directory relative to the binary
+    Dl_info info;
+    int ok = dladdr(reinterpret_cast<void *>(&getPluginDir), &info);
+    if (!ok) {
+        NIXL_ERROR << "Failed to get plugin directory from dladdr";
+        return "";
+    }
+    return (std::filesystem::path(info.dli_fname).parent_path() / "plugins").string();
+}
+} // namespace
+
 // PluginManager implementation
 nixlPluginManager::nixlPluginManager() {
     // Force levels right before logging
@@ -181,11 +201,10 @@ nixlPluginManager::nixlPluginManager() {
     }
 #endif
 
-    // Check for NIXL_PLUGIN_DIR environment variable
-    const char* plugin_dir = getenv("NIXL_PLUGIN_DIR");
-    if (plugin_dir) {
-        NIXL_DEBUG << "Loading plugins from directory: " << plugin_dir;
-        plugin_dirs_.insert(plugin_dirs_.begin(), plugin_dir);  // Insert at the beginning for priority
+    std::string plugin_dir = getPluginDir();
+    if (!plugin_dir.empty()) {
+        NIXL_DEBUG << "Loading plugins from: " << plugin_dir;
+        plugin_dirs_.insert(plugin_dirs_.begin(), plugin_dir);
         discoverPluginsFromDir(plugin_dir);
     }
 
@@ -371,34 +390,46 @@ const std::vector<nixlStaticPluginInfo>& nixlPluginManager::getStaticPlugins() {
     return static_plugins_;
 }
 
+#define NIXL_REGISTER_STATIC_PLUGIN(name)                   \
+    extern nixlBackendPlugin *createStatic##name##Plugin(); \
+    registerStaticPlugin(#name, createStatic##name##Plugin);
+
 void nixlPluginManager::registerBuiltinPlugins() {
 #ifdef STATIC_PLUGIN_UCX
-        extern nixlBackendPlugin* createStaticUcxPlugin();
-        registerStaticPlugin("UCX", createStaticUcxPlugin);
-#endif //STATIC_PLUGIN_UCX
+    NIXL_REGISTER_STATIC_PLUGIN(UCX)
+#endif
 
 #ifdef STATIC_PLUGIN_UCX_MO
-        extern nixlBackendPlugin* createStaticUcxMoPlugin();
-        registerStaticPlugin("UCX_MO", createStaticUcxMoPlugin);
-#endif // STATIC_PLUGIN_UCX_MO
+    NIXL_REGISTER_STATIC_PLUGIN(UCX_MO)
+#endif
 
 #ifdef STATIC_PLUGIN_GDS
 #ifndef DISABLE_GDS_BACKEND
-        extern nixlBackendPlugin* createStaticGdsPlugin();
-        registerStaticPlugin("GDS", createStaticGdsPlugin);
-#endif // DISABLE_GDS_BACKEND
-#endif // STATIC_PLUGIN_GDS
+    NIXL_REGISTER_STATIC_PLUGIN(GDS)
+#endif
+#endif
+
+#ifdef STATIC_PLUGIN_GDS_MT
+    NIXL_REGISTER_STATIC_PLUGIN(GDS_MT)
+#endif
 
 #ifdef STATIC_PLUGIN_POSIX
-        extern nixlBackendPlugin* createStaticPosixPlugin();
-        registerStaticPlugin("POSIX", createStaticPosixPlugin);
-#endif // STATIC_PLUGIN_POSIX
+    NIXL_REGISTER_STATIC_PLUGIN(POSIX)
+#endif
 
 #ifdef STATIC_PLUGIN_GPUNETIO
-#ifndef DISABLE_GPUNETIO_BACKEND
-        extern nixlBackendPlugin* createStaticGpunetioPlugin();
-        registerStaticPlugin("GPUNETIO", createStaticGpunetioPlugin);
-#endif // DISABLE_GPUNETIO_BACKEND
-#endif // STATIC_PLUGIN_GPUNETIO
+    NIXL_REGISTER_STATIC_PLUGIN(GPUNETIO)
+#endif
 
+#ifdef STATIC_PLUGIN_OBJ
+    NIXL_REGISTER_STATIC_PLUGIN(OBJ)
+#endif
+
+#ifdef STATIC_PLUGIN_MOONCAKE
+    NIXL_REGISTER_STATIC_PLUGIN(MOONCAKE)
+#endif
+
+#ifdef STATIC_PLUGIN_HF3FS
+    NIXL_REGISTER_STATIC_PLUGIN(HF3FS)
+#endif
 }

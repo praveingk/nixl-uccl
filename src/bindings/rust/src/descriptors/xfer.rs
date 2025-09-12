@@ -23,10 +23,10 @@ pub struct XferDescList<'a> {
 
 impl<'a> XferDescList<'a> {
     /// Creates a new transfer descriptor list for the given memory type
-    pub fn new(mem_type: MemType, sorted: bool) -> Result<Self, NixlError> {
+    pub fn new(mem_type: MemType) -> Result<Self, NixlError> {
         let mut dlist = ptr::null_mut();
         let status = unsafe {
-            nixl_capi_create_xfer_dlist(mem_type as nixl_capi_mem_type_t, &mut dlist, sorted)
+            nixl_capi_create_xfer_dlist(mem_type as nixl_capi_mem_type_t, &mut dlist)
         };
 
         match status {
@@ -39,6 +39,21 @@ impl<'a> XferDescList<'a> {
                 })
             }
             NIXL_CAPI_ERROR_INVALID_PARAM => Err(NixlError::InvalidParam),
+            _ => Err(NixlError::BackendError),
+        }
+    }
+
+    pub fn as_ptr(&self) -> *mut bindings::nixl_capi_xfer_dlist_s {
+        self.inner.as_ptr()
+    }
+
+    /// Returns the memory type of the transfer descriptor list
+    pub fn get_type(&self) -> Result<MemType, NixlError> {
+        let mut mem_type = 0;
+        let status = unsafe { nixl_capi_xfer_dlist_get_type(self.inner.as_ptr(), &mut mem_type) };
+
+        match status {
+            NIXL_CAPI_SUCCESS => Ok(MemType::from(mem_type)),
             _ => Err(NixlError::BackendError),
         }
     }
@@ -62,6 +77,17 @@ impl<'a> XferDescList<'a> {
     }
 
     /// Returns the number of descriptors in the list
+    pub fn desc_count(&self) -> Result<usize, NixlError> {
+        let mut count = 0;
+        let status = unsafe { nixl_capi_xfer_dlist_desc_count(self.inner.as_ptr(), &mut count) };
+
+        match status {
+            NIXL_CAPI_SUCCESS => Ok(count),
+            _ => Err(NixlError::BackendError),
+        }
+    }
+
+    /// Returns the number of descriptors in the list
     pub fn len(&self) -> Result<usize, NixlError> {
         let mut len = 0;
         let status = unsafe { nixl_capi_xfer_dlist_len(self.inner.as_ptr(), &mut len) };
@@ -73,14 +99,23 @@ impl<'a> XferDescList<'a> {
         }
     }
 
-    /// Returns true if any descriptors in the list overlap
-    pub fn has_overlaps(&self) -> Result<bool, NixlError> {
-        let mut has_overlaps = false;
-        let status =
-            unsafe { nixl_capi_xfer_dlist_has_overlaps(self.inner.as_ptr(), &mut has_overlaps) };
+     /// Trims the list to the given size
+     pub fn trim(&mut self) -> Result<(), NixlError> {
+        let status = unsafe { nixl_capi_xfer_dlist_trim(self.inner.as_ptr()) };
 
         match status {
-            NIXL_CAPI_SUCCESS => Ok(has_overlaps),
+            NIXL_CAPI_SUCCESS => Ok(()),
+            NIXL_CAPI_ERROR_INVALID_PARAM => Err(NixlError::InvalidParam),
+            _ => Err(NixlError::BackendError),
+        }
+    }
+
+    /// Removes the descriptor at the given index
+    pub fn rem_desc(&mut self, index: i32) -> Result<(), NixlError> {
+        let status = unsafe { nixl_capi_xfer_dlist_rem_desc(self.inner.as_ptr(), index) };
+
+        match status {
+            NIXL_CAPI_SUCCESS => Ok(()),
             NIXL_CAPI_ERROR_INVALID_PARAM => Err(NixlError::InvalidParam),
             _ => Err(NixlError::BackendError),
         }
@@ -89,6 +124,17 @@ impl<'a> XferDescList<'a> {
     /// Clears all descriptors from the list
     pub fn clear(&mut self) -> Result<(), NixlError> {
         let status = unsafe { nixl_capi_xfer_dlist_clear(self.inner.as_ptr()) };
+
+        match status {
+            NIXL_CAPI_SUCCESS => Ok(()),
+            NIXL_CAPI_ERROR_INVALID_PARAM => Err(NixlError::InvalidParam),
+            _ => Err(NixlError::BackendError),
+        }
+    }
+
+    /// Prints the list contents
+    pub fn print(&self) -> Result<(), NixlError> {
+        let status = unsafe { nixl_capi_xfer_dlist_print(self.inner.as_ptr()) };
 
         match status {
             NIXL_CAPI_SUCCESS => Ok(()),
@@ -129,8 +175,7 @@ impl<'a> XferDescList<'a> {
                 _ => Err(NixlError::BackendError),
             }?;
             if len > 0 {
-                // TODO: Add API to get descriptor memory type
-                MemType::Unknown
+                self.get_type().unwrap()
             } else {
                 desc_mem_type
             }

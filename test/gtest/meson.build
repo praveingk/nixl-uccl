@@ -22,7 +22,18 @@ if not gtest_dep.found()
     subdir_done()
 endif
 
+gmock_dep = dependency('gmock', required : false)
+
+if not gmock_dep.found()
+    message('GMock not found, skipping gtest build')
+    subdir_done()
+endif
+
+gtest_inc_dirs = include_directories('.')
+
 subdir('mocks')
+subdir('unit')
+subdir('plugins')
 
 plugin_dirs_arg = '--tests_plugin_dirs=' + mocks_dep.get_variable('path')
 
@@ -42,11 +53,32 @@ endif
 # for loading plugins from build directory
 cpp_flags += '-DBUILD_DIR="' + meson.project_build_root() + '"'
 
+gtest_sources = [
+    'main.cpp',
+    'mocks/gmock_engine.cpp',
+    'plugin_manager.cpp',
+    'error_handling.cpp',
+    'test_transfer.cpp',
+    'metadata_exchange.cpp',
+    'common.cpp',
+    'query_mem.cpp',
+    'telemetry_test.cpp'
+    ]
+
+if ucx_gpu_device_api_available
+    gtest_sources += 'device_api_test.cu'
+    device_api_inc = nixl_gpu_inc_dirs
+    device_api_dep = ucx_dep
+else
+    device_api_inc = []
+    device_api_dep = []
+endif
+
 test_exe = executable('gtest',
-    sources : ['main.cpp', 'plugin_manager.cpp', 'error_handling.cpp', 'test_transfer.cpp', 'metadata_exchange.cpp', 'common.cpp'],
-    include_directories: [nixl_inc_dirs, utils_inc_dirs],
+    sources : gtest_sources,
+    include_directories: [nixl_inc_dirs, utils_inc_dirs, device_api_inc],
     cpp_args : cpp_flags,
-    dependencies : [nixl_dep, cuda_dep, gtest_dep, absl_strings_dep, absl_time_dep],
+    dependencies : [nixl_dep, nixl_common_dep, cuda_dep, device_api_dep, gtest_dep, gmock_dep, absl_strings_dep, absl_time_dep, file_utils_interface],
     link_with: [nixl_build_lib],
     install : true
 )
@@ -59,10 +91,10 @@ if get_option('b_sanitize').split(',').contains('thread')
     test_env.set('NIXL_PLUGIN_DIR', mocks_dep.get_variable('path'))
 
     mt_test_exe = executable('mt_test',
-        sources : ['main.cpp', 'multi_threading.cpp'],
+        sources : ['main.cpp', 'mocks/gmock_engine.cpp', 'multi_threading.cpp'],
         include_directories: [nixl_inc_dirs, utils_inc_dirs],
         cpp_args : cpp_flags,
-        dependencies : [nixl_dep, nixl_infra, cuda_dep, gtest_dep],
+        dependencies : [nixl_dep, nixl_infra, cuda_dep, gtest_dep, gmock_dep],
         link_with: [nixl_build_lib],
     )
 

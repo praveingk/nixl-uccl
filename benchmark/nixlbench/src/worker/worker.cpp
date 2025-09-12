@@ -28,11 +28,17 @@ static xferBenchRT *createRT(int *terminate) {
             total = xferBenchConfig::num_initiator_dev +
                 xferBenchConfig::num_target_dev;
         }
-        if ((XFERBENCH_BACKEND_GDS == xferBenchConfig::backend) ||
-            (XFERBENCH_BACKEND_POSIX == xferBenchConfig::backend)) {
+        if (xferBenchConfig::isStorageBackend()) {
             total = 1;
         }
-        return new xferBenchEtcdRT(xferBenchConfig::etcd_endpoints, total, terminate);
+        xferBenchEtcdRT *etcd_rt = new xferBenchEtcdRT(
+            xferBenchConfig::benchmark_group, xferBenchConfig::etcd_endpoints, total, terminate);
+        if (etcd_rt->setup() != 0) {
+            std::cerr << "Failed to setup ETCD runtime" << std::endl;
+            delete etcd_rt;
+            exit (EXIT_FAILURE);
+        }
+        return etcd_rt;
     }
 
     std::cerr << "Invalid runtime: " << xferBenchConfig::runtime_type << std::endl;
@@ -40,7 +46,14 @@ static xferBenchRT *createRT(int *terminate) {
 }
 
 int xferBenchWorker::synchronize() {
-    return rt->barrier("sync");
+    if (rt->barrier("sync") != 0) {
+        std::cerr << "Failed to synchronize" << std::endl;
+        // assuming this is a fatal error, continue benchmarking after synchronization failure does
+        // not make sense
+        exit(EXIT_FAILURE);
+    }
+
+    return 0;
 }
 
 xferBenchWorker::xferBenchWorker(int *argc, char ***argv) {

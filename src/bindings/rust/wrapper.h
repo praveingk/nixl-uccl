@@ -16,12 +16,16 @@
  */
 #pragma once
 
+
+#ifdef __cplusplus
+#include <cstdbool>
+#include <cstddef>
+#include <cstdint>
+extern "C" {
+#else
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-#ifdef __cplusplus
-extern "C" {
 #endif
 
 // Status codes for our C API
@@ -56,6 +60,7 @@ struct nixl_capi_xfer_dlist_handle_s;
 struct nixl_capi_reg_dlist_s;
 struct nixl_capi_xfer_req_s;
 struct nixl_capi_notif_map_s;
+struct nixl_capi_query_resp_list_s;
 
 // Opaque handle types for C++ objects
 typedef struct nixl_capi_agent_s* nixl_capi_agent_t;
@@ -66,10 +71,11 @@ typedef struct nixl_capi_backend_s* nixl_capi_backend_t;
 typedef struct nixl_capi_opt_args_s* nixl_capi_opt_args_t;
 typedef struct nixl_capi_param_iter_s* nixl_capi_param_iter_t;
 typedef struct nixl_capi_xfer_dlist_s* nixl_capi_xfer_dlist_t;
-typedef struct nixl_capi_xfer_dlist_handle_s* nixl_capi_xfer_dlist_handle_t;
+typedef struct nixl_capi_xfer_dlist_handle_s *nixl_capi_xfer_dlist_handle_t;
 typedef struct nixl_capi_reg_dlist_s* nixl_capi_reg_dlist_t;
 typedef struct nixl_capi_xfer_req_s* nixl_capi_xfer_req_t;
 typedef struct nixl_capi_notif_map_s* nixl_capi_notif_map_t;
+typedef struct nixl_capi_query_resp_list_s *nixl_capi_query_resp_list_t;
 
 // Transfer request functions
 typedef enum {
@@ -85,6 +91,14 @@ nixl_capi_status_t nixl_capi_destroy_agent(nixl_capi_agent_t agent);
 // Get local metadata as a byte array
 nixl_capi_status_t nixl_capi_get_local_md(nixl_capi_agent_t agent, void** data, size_t* len);
 
+// Get local partial metadata as a byte array
+nixl_capi_status_t
+nixl_capi_get_local_partial_md(nixl_capi_agent_t agent,
+                               nixl_capi_reg_dlist_t descs,
+                               void **data,
+                               size_t *len,
+                               nixl_capi_opt_args_t opt_args);
+
 // Load remote metadata from a byte array
 nixl_capi_status_t nixl_capi_load_remote_md(nixl_capi_agent_t agent, const void* data, size_t len, char** agent_name);
 
@@ -99,6 +113,12 @@ nixl_capi_status_t nixl_capi_check_remote_md(nixl_capi_agent_t agent, const char
 
 // Send local metadata to etcd
 nixl_capi_status_t nixl_capi_send_local_md(nixl_capi_agent_t agent, nixl_capi_opt_args_t opt_args);
+
+// Send local partial metadata to etcd
+nixl_capi_status_t
+nixl_capi_send_local_partial_md(nixl_capi_agent_t agent,
+                                nixl_capi_reg_dlist_t descs,
+                                nixl_capi_opt_args_t opt_args);
 
 // Fetch remote metadata from etcd
 nixl_capi_status_t nixl_capi_fetch_remote_md(nixl_capi_agent_t agent, const char* remote_name, nixl_capi_opt_args_t opt_args);
@@ -136,6 +156,10 @@ nixl_capi_status_t nixl_capi_opt_args_set_has_notif(nixl_capi_opt_args_t args, b
 nixl_capi_status_t nixl_capi_opt_args_get_has_notif(nixl_capi_opt_args_t args, bool* has_notif);
 nixl_capi_status_t nixl_capi_opt_args_set_skip_desc_merge(nixl_capi_opt_args_t args, bool skip_merge);
 nixl_capi_status_t nixl_capi_opt_args_get_skip_desc_merge(nixl_capi_opt_args_t args, bool* skip_merge);
+nixl_capi_status_t
+nixl_capi_opt_args_set_ip_addr(nixl_capi_opt_args_t args, const char *ip_addr);
+nixl_capi_status_t
+nixl_capi_opt_args_set_port(nixl_capi_opt_args_t args, uint16_t port);
 
 // Parameter access functions
 nixl_capi_status_t nixl_capi_params_is_empty(nixl_capi_params_t params, bool* is_empty);
@@ -160,15 +184,28 @@ nixl_capi_status_t nixl_capi_deregister_mem(
 nixl_capi_status_t nixl_capi_agent_make_connection(
     nixl_capi_agent_t agent, const char* remote_agent, nixl_capi_opt_args_t opt_args);
 
-nixl_capi_status_t nixl_capi_agent_prep_xfer_dlist(
-    nixl_capi_agent_t agent, const char* agent_name, nixl_capi_xfer_dlist_t descs,
-    nixl_capi_xfer_dlist_handle_t handle, nixl_capi_opt_args_t opt_args);
+nixl_capi_status_t
+nixl_capi_prep_xfer_dlist(nixl_capi_agent_t agent,
+                          const char *agent_name,
+                          nixl_capi_xfer_dlist_t descs,
+                          nixl_capi_xfer_dlist_handle_t *dlist_hndl,
+                          nixl_capi_opt_args_t opt_args);
 
-nixl_capi_status_t nixl_capi_agent_make_xfer_req(
-    nixl_capi_agent_t agent, nixl_capi_xfer_op_t operation, nixl_capi_xfer_dlist_t local_descs,
-    nixl_capi_xfer_dlist_t remote_descs, const char* remote_agent, nixl_capi_xfer_req_t* req_hndl,
-    nixl_capi_opt_args_t opt_args);
+nixl_capi_status_t
+nixl_capi_release_xfer_dlist_handle(nixl_capi_agent_t agent,
+                                    nixl_capi_xfer_dlist_handle_t dlist_handle);
 
+nixl_capi_status_t
+nixl_capi_make_xfer_req(nixl_capi_agent_t agent,
+                        nixl_capi_xfer_op_t operation,
+                        nixl_capi_xfer_dlist_handle_t local_descs,
+                        const int *local_indices,
+                        size_t local_indices_count,
+                        nixl_capi_xfer_dlist_handle_t remote_descs,
+                        const int *remote_indices,
+                        size_t remote_indices_count,
+                        nixl_capi_xfer_req_t *req_hndl,
+                        nixl_capi_opt_args_t opt_args);
 
 // Notification functions
 nixl_capi_status_t nixl_capi_get_notifs(
@@ -201,12 +238,18 @@ nixl_capi_status_t nixl_capi_post_xfer_req(
 
 nixl_capi_status_t nixl_capi_get_xfer_status(nixl_capi_agent_t agent, nixl_capi_xfer_req_t req_hndl);
 
+nixl_capi_status_t
+nixl_capi_query_xfer_backend(nixl_capi_agent_t agent,
+                             nixl_capi_xfer_req_t req_hndl,
+                             nixl_capi_backend_t *backend);
+
 nixl_capi_status_t nixl_capi_release_xfer_req(nixl_capi_agent_t agent, nixl_capi_xfer_req_t req);
 
 nixl_capi_status_t nixl_capi_destroy_xfer_req(nixl_capi_xfer_req_t req);
 
 // Descriptor list functions
-nixl_capi_status_t nixl_capi_create_xfer_dlist(nixl_capi_mem_type_t mem_type, nixl_capi_xfer_dlist_t* dlist, bool sorted);
+nixl_capi_status_t
+nixl_capi_create_xfer_dlist(nixl_capi_mem_type_t mem_type, nixl_capi_xfer_dlist_t *dlist);
 nixl_capi_status_t nixl_capi_destroy_xfer_dlist(nixl_capi_xfer_dlist_t dlist);
 nixl_capi_status_t nixl_capi_xfer_dlist_get_type(nixl_capi_xfer_dlist_t dlist, nixl_capi_mem_type_t* mem_type);
 nixl_capi_status_t nixl_capi_xfer_dlist_add_desc(
@@ -214,32 +257,28 @@ nixl_capi_status_t nixl_capi_xfer_dlist_add_desc(
 nixl_capi_status_t nixl_capi_xfer_dlist_desc_count(nixl_capi_xfer_dlist_t dlist, size_t* count);
 nixl_capi_status_t nixl_capi_xfer_dlist_len(nixl_capi_xfer_dlist_t dlist, size_t* len);
 nixl_capi_status_t nixl_capi_xfer_dlist_is_empty(nixl_capi_xfer_dlist_t dlist, bool* is_empty);
-nixl_capi_status_t nixl_capi_xfer_dlist_is_sorted(nixl_capi_xfer_dlist_t dlist, bool* is_sorted);
 nixl_capi_status_t nixl_capi_xfer_dlist_trim(nixl_capi_xfer_dlist_t dlist);
 nixl_capi_status_t nixl_capi_xfer_dlist_rem_desc(nixl_capi_xfer_dlist_t dlist, int index);
-nixl_capi_status_t nixl_capi_xfer_dlist_has_overlaps(nixl_capi_xfer_dlist_t dlist, bool* has_overlaps);
-nixl_capi_status_t nixl_capi_xfer_dlist_verify_sorted(nixl_capi_xfer_dlist_t dlist, bool *is_sorted);
 nixl_capi_status_t nixl_capi_xfer_dlist_clear(nixl_capi_xfer_dlist_t dlist);
 nixl_capi_status_t nixl_capi_xfer_dlist_resize(nixl_capi_xfer_dlist_t dlist, size_t new_size);
 nixl_capi_status_t nixl_capi_xfer_dlist_print(nixl_capi_xfer_dlist_t dlist);
 
-// Descriptor list handle functions
-nixl_capi_status_t nixl_capi_create_xfer_dlist_handle(nixl_capi_xfer_dlist_handle_t* handle);
-nixl_capi_status_t nixl_capi_destroy_xfer_dlist_handle(nixl_capi_xfer_dlist_handle_t handle);
-
-nixl_capi_status_t nixl_capi_create_reg_dlist(nixl_capi_mem_type_t mem_type, nixl_capi_reg_dlist_t* dlist, bool sorted);
+nixl_capi_status_t
+nixl_capi_create_reg_dlist(nixl_capi_mem_type_t mem_type, nixl_capi_reg_dlist_t *dlist);
 nixl_capi_status_t nixl_capi_destroy_reg_dlist(nixl_capi_reg_dlist_t dlist);
 nixl_capi_status_t nixl_capi_reg_dlist_get_type(nixl_capi_reg_dlist_t dlist, nixl_capi_mem_type_t* mem_type);
-nixl_capi_status_t nixl_capi_reg_dlist_verify_sorted(nixl_capi_reg_dlist_t dlist, bool *is_sorted);
-nixl_capi_status_t nixl_capi_reg_dlist_add_desc(
-    nixl_capi_reg_dlist_t dlist, uintptr_t addr, size_t len, uint64_t dev_id);
+nixl_capi_status_t
+nixl_capi_reg_dlist_add_desc(nixl_capi_reg_dlist_t dlist,
+                             uintptr_t addr,
+                             size_t len,
+                             uint64_t dev_id,
+                             const void *metadata,
+                             size_t metadata_len);
 nixl_capi_status_t nixl_capi_reg_dlist_len(nixl_capi_reg_dlist_t dlist, size_t* len);
 nixl_capi_status_t nixl_capi_reg_dlist_desc_count(nixl_capi_reg_dlist_t dlist, size_t* count);
 nixl_capi_status_t nixl_capi_reg_dlist_is_empty(nixl_capi_reg_dlist_t dlist, bool* is_empty);
-nixl_capi_status_t nixl_capi_reg_dlist_is_sorted(nixl_capi_reg_dlist_t dlist, bool* is_sorted);
 nixl_capi_status_t nixl_capi_reg_dlist_trim(nixl_capi_reg_dlist_t dlist);
 nixl_capi_status_t nixl_capi_reg_dlist_rem_desc(nixl_capi_reg_dlist_t dlist, int index);
-nixl_capi_status_t nixl_capi_reg_dlist_has_overlaps(nixl_capi_reg_dlist_t dlist, bool* has_overlaps);
 nixl_capi_status_t nixl_capi_reg_dlist_clear(nixl_capi_reg_dlist_t dlist);
 nixl_capi_status_t nixl_capi_reg_dlist_resize(nixl_capi_reg_dlist_t dlist, size_t new_size);
 nixl_capi_status_t nixl_capi_reg_dlist_print(nixl_capi_reg_dlist_t dlist);
@@ -249,6 +288,29 @@ nixl_capi_status_t nixl_capi_notif_map_get_notifs_size(nixl_capi_notif_map_t map
 nixl_capi_status_t nixl_capi_notif_map_get_notif(
     nixl_capi_notif_map_t map, const char* agent_name, size_t index, const void** data, size_t* len);
 nixl_capi_status_t nixl_capi_notif_map_clear(nixl_capi_notif_map_t map);
+
+// Query response list functions
+nixl_capi_status_t
+nixl_capi_create_query_resp_list(nixl_capi_query_resp_list_t *list);
+nixl_capi_status_t
+nixl_capi_destroy_query_resp_list(nixl_capi_query_resp_list_t list);
+nixl_capi_status_t
+nixl_capi_query_resp_list_size(nixl_capi_query_resp_list_t list, size_t *size);
+nixl_capi_status_t
+nixl_capi_query_resp_list_has_value(nixl_capi_query_resp_list_t list,
+                                    size_t index,
+                                    bool *has_value);
+nixl_capi_status_t
+nixl_capi_query_resp_list_get_params(nixl_capi_query_resp_list_t list,
+                                     size_t index,
+                                     nixl_capi_params_t *params);
+
+// Query memory function
+nixl_capi_status_t
+nixl_capi_query_mem(nixl_capi_agent_t agent,
+                    nixl_capi_reg_dlist_t descs,
+                    nixl_capi_query_resp_list_t resp,
+                    nixl_capi_opt_args_t opt_args);
 
 #ifdef __cplusplus
 }

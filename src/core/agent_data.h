@@ -19,14 +19,16 @@
 
 #include "common/str_tools.h"
 #include "mem_section.h"
+#include "telemetry.h"
 #include "stream/metadata_stream.h"
 #include "sync.h"
 
+
 #if HAVE_ETCD
-#include <etcd/Client.hpp>
+#include <etcd/SyncClient.hpp>
 
 namespace etcd {
-    class Client;
+class SyncClient;
 }
 
 #define NIXL_ETCD_NAMESPACE_DEFAULT "/nixl/agents/"
@@ -62,6 +64,7 @@ class nixlAgentData {
         std::string     name;
         nixlAgentConfig config;
         nixlLock        lock;
+        bool telemetryEnabled = false;
 
         // some handle that can be used to instantiate an object from the lib
         std::map<std::string, void*> backendLibs;
@@ -74,6 +77,9 @@ class nixlAgentData {
         // Bookkeping for local connection metadata and user handles per backend
         std::unordered_map<nixl_backend_t, nixlBackendH*> backendHandles;
         std::unordered_map<nixl_backend_t, nixl_blob_t>   connMD;
+
+        // Bookkeeping from GPU request handles to backend engines
+        std::unordered_map<nixlGpuXferReqH, nixlBackendEngine *> gpuReqToEngine;
 
         // Local section, and Remote sections and their available common backends
         nixlLocalSection*                                        memorySection;
@@ -92,14 +98,27 @@ class nixlAgentData {
         std::mutex                         commLock;
         bool                               commThreadStop;
         bool                               useEtcd;
-
+        std::unique_ptr<nixlTelemetry> telemetry_;
         void commWorker(nixlAgent* myAgent);
         void enqueueCommWork(nixl_comm_req_t request);
         void getCommWork(std::vector<nixl_comm_req_t> &req_list);
+        nixl_status_t
+        loadConnInfo(const std::string &remote_name,
+                     const nixl_backend_t &backend,
+                     const nixl_blob_t &conn_info);
+        nixl_status_t
+        loadRemoteSections(const std::string &remote_name, nixlSerDes &sd);
+        nixl_status_t
+        invalidateRemoteData(const std::string &remote_name);
 
     public:
         nixlAgentData(const std::string &name, const nixlAgentConfig &cfg);
         ~nixlAgentData();
+
+        inline void
+        addErrorTelemetry(nixl_status_t err_status) {
+            if (telemetry_) telemetry_->updateErrorCount(err_status);
+        }
 
     friend class nixlAgent;
 };
@@ -119,7 +138,6 @@ class nixlBackendH {
         bool supportsRemote () const { return engine->supportsRemote(); }
         bool supportsLocal  () const { return engine->supportsLocal (); }
         bool supportsNotif  () const { return engine->supportsNotif (); }
-        bool supportsProgTh () const { return engine->supportsProgTh(); }
 
     friend class nixlAgentData;
     friend class nixlAgent;

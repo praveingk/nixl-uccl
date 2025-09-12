@@ -22,7 +22,7 @@ if etcd_dep.found()
 endif
 
 if 'UCX' in static_plugins
-    nixl_lib_deps += [ ucx_backend_interface, cuda_dep ]
+    nixl_lib_deps += [ ucx_backend_interface, asio_dep, cuda_dep ]
 endif
 
 if 'UCX_MO' in static_plugins
@@ -33,9 +33,17 @@ if 'POSIX' in static_plugins
     nixl_lib_deps += [ posix_backend_interface ]
 endif
 
+if 'OBJ' in static_plugins
+    nixl_lib_deps += [ obj_backend_interface ]
+endif
+
 disable_gds_backend = get_option('disable_gds_backend')
 if not disable_gds_backend and 'GDS' in static_plugins
     nixl_lib_deps += [ gds_backend_interface, cuda_dep ]
+endif
+
+if 'GDS_MT' in static_plugins
+    nixl_lib_deps += [ gds_mt_backend_interface, taskflow_proj, cuda_dep ]
 endif
 
 cc = meson.get_compiler('cpp')
@@ -49,6 +57,7 @@ nixl_lib = library('nixl',
                    'nixl_agent.cpp',
                    'nixl_plugin_manager.cpp',
                    'nixl_listener.cpp',
+                   'telemetry.cpp',
                    include_directories: [ nixl_inc_dirs, utils_inc_dirs ],
                    link_args: ['-lstdc++fs'],
                    dependencies: nixl_lib_deps,

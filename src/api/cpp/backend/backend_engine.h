@@ -20,8 +20,14 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
+#include <mutex>
+
 #include "nixl_types.h"
 #include "backend_aux.h"
+#include "telemetry_event.h"
+
+constexpr size_t MAX_TELEMETRY_QUEUE_SIZE = 1000;
 
 // Base backend engine class for different backend implementations
 class nixlBackendEngine {
@@ -29,34 +35,51 @@ class nixlBackendEngine {
         // Members that cannot be modified by a child backend and parent bookkeep
         nixl_backend_t  backendType;
         nixl_b_params_t customParams;
+        std::vector<nixlTelemetryEvent> telemetryEvents_;
+        std::mutex telemetryEventsMutex_;
 
     protected:
         // Members that can be accessed by the child (localAgent cannot be modified)
         bool              initErr = false;
         const std::string localAgent;
+        const bool enableTelemetry_;
 
-        [[nodiscard]] nixl_status_t setInitParam(const std::string &key, const std::string &value) {
-	    if (customParams.try_emplace(key,value).second) {
+        [[nodiscard]] nixl_status_t
+        setInitParam(const std::string &key, const std::string &value) {
+            if (customParams.emplace(key, value).second) {
                 return NIXL_SUCCESS;
             }
-	    return NIXL_ERR_NOT_ALLOWED;
+            return NIXL_ERR_NOT_ALLOWED;
         }
 
         [[nodiscard]] nixl_status_t getInitParam(const std::string &key, std::string &value) const {
-	    const auto iter = customParams.find(key);
+            const auto iter = customParams.find(key);
             if (iter != customParams.end()) {
                 value = iter->second;
                 return NIXL_SUCCESS;
-	    }
-	    return NIXL_ERR_INVALID_PARAM;
+            }
+            return NIXL_ERR_INVALID_PARAM;
+        }
+
+        void
+        addTelemetryEvent(const std::string &event_name, uint64_t value) {
+            if (!enableTelemetry_) return;
+            if (telemetryEvents_.size() >= MAX_TELEMETRY_QUEUE_SIZE) return;
+            std::lock_guard<std::mutex> lock(telemetryEventsMutex_);
+            telemetryEvents_.emplace_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::system_clock::now().time_since_epoch())
+                                              .count(),
+                                          nixl_telemetry_category_t::NIXL_TELEMETRY_BACKEND,
+                                          event_name,
+                                          value);
         }
 
     public:
-        explicit nixlBackendEngine (const nixlBackendInitParams* init_params)
+        explicit nixlBackendEngine(const nixlBackendInitParams *init_params)
             : backendType(init_params->type),
               customParams(*init_params->customParams),
-              localAgent(init_params->localAgent) {
-        }
+              localAgent(init_params->localAgent),
+              enableTelemetry_(init_params->enableTelemetry_) {}
 
         nixlBackendEngine(nixlBackendEngine&&) = delete;
         nixlBackendEngine(const nixlBackendEngine&) = delete;
@@ -65,6 +88,12 @@ class nixlBackendEngine {
         void operator=(const nixlBackendEngine&) = delete;
 
         virtual ~nixlBackendEngine() = default;
+
+        std::vector<nixlTelemetryEvent>
+        getTelemetryEvents() {
+            std::lock_guard<std::mutex> lock(telemetryEventsMutex_);
+            return std::move(telemetryEvents_);
+        }
 
         bool getInitErr() const noexcept { return initErr; }
         const nixl_backend_t& getType() const noexcept { return backendType; }
@@ -82,9 +111,6 @@ class nixlBackendEngine {
         // Determines if a backend supports sending notifications. Related methods are not
         // pure virtual, and return errors, as parent shouldn't call if supportsNotif is false.
         virtual bool supportsNotif() const = 0;
-
-        // Determines if a backend supports progress thread.
-        virtual bool supportsProgTh() const = 0;
 
         virtual nixl_mem_list_t getSupportedMems() const = 0;  // TODO: Return by const-reference and mark noexcept?
 
@@ -115,20 +141,6 @@ class nixlBackendEngine {
                                         const nixl_opt_b_args_t* opt_args=nullptr
                                        ) const = 0;
 
-        // Estimate the cost (duration) of a transfer operation.
-        virtual nixl_status_t estimateXferCost(const nixl_xfer_op_t &operation,
-                                               const nixl_meta_dlist_t &local,
-                                               const nixl_meta_dlist_t &remote,
-                                               const std::string &remote_agent,
-                                               nixlBackendReqH* const &handle,
-                                               std::chrono::microseconds &duration,
-                                               std::chrono::microseconds &err_margin,
-                                               nixl_cost_t &method,
-                                               const nixl_opt_args_t* extra_params = nullptr) const
-        {
-            return NIXL_ERR_NOT_SUPPORTED;
-        }
-
         // Posting a request, which completes the async handle creation and posts it
         virtual nixl_status_t postXfer (const nixl_xfer_op_t &operation,
                                         const nixl_meta_dlist_t &local,
@@ -144,6 +156,27 @@ class nixlBackendEngine {
         //Backend aborts the transfer if necessary, and destructs the relevant objects
         virtual nixl_status_t releaseReqH(nixlBackendReqH* handle) const = 0;
 
+        // Create a GPU transfer request to GPU memory for GPU transfer.
+        virtual nixl_status_t
+        createGpuXferReq(const nixlBackendReqH &req_hndl, nixlGpuXferReqH &gpu_req_hndl) const {
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
+
+        // Release a GPU transfer request from GPU memory
+        virtual void
+        releaseGpuXferReq(nixlGpuXferReqH gpu_req_hndl) const {}
+
+        // Get the size required for a GPU signal
+        virtual nixl_status_t
+        getGpuSignalSize(size_t &signal_size) const {
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
+
+        // Initialize a signal for GPU transfer using memory handle from descriptor
+        virtual nixl_status_t
+        prepGpuSignal(const nixlBackendMD &meta, void *signal) const {
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
 
         // *** Needs to be implemented if supportsRemote() is true *** //
 
@@ -194,9 +227,29 @@ class nixlBackendEngine {
         }
 
 
-        // *** Needs to be implemented if supportsProgTh() is true *** //
+        // *** Optional virtual methods that are good to be implemented in any backend *** //
 
-        // Force backend engine worker to progress.
-        virtual int progress() { return 0; }
+        // Query information about a list of memory/storage
+        virtual nixl_status_t
+        queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const {
+            // Default implementation for file backends
+            // File backends can override this to provide custom implementation
+            // For now, return not supported - for object backends
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
+
+        // Estimate the cost (duration) of a transfer operation.
+        virtual nixl_status_t
+        estimateXferCost(const nixl_xfer_op_t &operation,
+                         const nixl_meta_dlist_t &local,
+                         const nixl_meta_dlist_t &remote,
+                         const std::string &remote_agent,
+                         nixlBackendReqH *const &handle,
+                         std::chrono::microseconds &duration,
+                         std::chrono::microseconds &err_margin,
+                         nixl_cost_t &method,
+                         const nixl_opt_args_t *extra_params = nullptr) const {
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
 };
 #endif

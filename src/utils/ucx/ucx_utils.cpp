@@ -14,21 +14,39 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <exception>
-#include <vector>
-#include <string>
+
+#include "ucx_utils.h"
+
+#include <algorithm>
 #include <cstring>
+#include <exception>
 #include <stdexcept>
-#include <type_traits>
+#include <string>
+#include <vector>
 
 #include <nixl_types.h>
 
-#include "serdes/serdes.h"
+extern "C" {
+#ifdef HAVE_UCX_GPU_DEVICE_API
+#include <ucp/api/device/ucp_host.h>
+#endif
+}
 
-#include "ucx_utils.h"
 #include "common/nixl_log.h"
+#include "config.h"
+#include "serdes/serdes.h"
+#include "rkey.h"
 
 using namespace std;
+
+[[nodiscard]] nixl_b_params_t
+get_ucx_backend_common_options() {
+    nixl_b_params_t params = {{"ucx_devices", ""}, {"num_workers", "1"}};
+
+    params.emplace(nixl_ucx_err_handling_param_name,
+                   ucx_err_mode_to_string(UCP_ERR_HANDLING_MODE_PEER));
+    return params;
+}
 
 nixl_status_t ucx_status_to_nixl(ucs_status_t status)
 {
@@ -38,6 +56,7 @@ nixl_status_t ucx_status_to_nixl(ucs_status_t status)
 
     switch(status) {
     case UCS_INPROGRESS:
+    case UCS_ERR_BUSY:
         return NIXL_IN_PROG;
     case UCS_ERR_NOT_CONNECTED:
     case UCS_ERR_CONNECTION_RESET:
@@ -45,30 +64,54 @@ nixl_status_t ucx_status_to_nixl(ucs_status_t status)
         return NIXL_ERR_REMOTE_DISCONNECT;
     case UCS_ERR_INVALID_PARAM:
         return NIXL_ERR_INVALID_PARAM;
+    case UCS_ERR_CANCELED:
+        return NIXL_ERR_CANCELED;
     default:
         NIXL_WARN << "Unexpected UCX error: " << ucs_status_string(status);
         return NIXL_ERR_BACKEND;
     }
 }
 
-void ucx_modify_config(ucp_config_t *config, std::string_view key,
-                       std::string_view value)
-{
-    const char *env_val = std::getenv(absl::StrFormat("UCX_%s", key.data()).c_str());
-    value = env_val ? env_val : value;
-
-    ucs_status_t status = ucp_config_modify(config, key.data(), value.data());
-    if (status != UCS_OK) {
-        NIXL_WARN << "Failed to modify UCX config: " << key << "=" << value
-                  << ": " << ucs_status_string(status);
-    } else {
-        NIXL_DEBUG << "Applied UCX config from " << (env_val ? "env var" : "NIXL")
-                   << ": " << key << "=" << value;
+[[nodiscard]] std::string_view
+ucx_err_mode_to_string(ucp_err_handling_mode_t t) {
+    switch (t) {
+    case UCP_ERR_HANDLING_MODE_NONE:
+        return "none";
+    case UCP_ERR_HANDLING_MODE_PEER:
+        return "peer";
+    default:
+        throw std::invalid_argument(std::to_string(t));
     }
 }
 
-static void err_cb_wrapper(void *arg, ucp_ep_h ucp_ep, ucs_status_t status)
-{
+[[nodiscard]] ucp_err_handling_mode_t
+ucx_err_mode_from_string(std::string_view s) {
+    constexpr std::array<ucp_err_handling_mode_t, 2> nixl_ucx_err_handling_modes = {
+        UCP_ERR_HANDLING_MODE_NONE,
+        UCP_ERR_HANDLING_MODE_PEER,
+    };
+
+    for (const auto mode : nixl_ucx_err_handling_modes) {
+        if (ucx_err_mode_to_string(mode) == s) {
+            return mode;
+        }
+    }
+
+    std::stringstream err_msg;
+    err_msg << "Invalid error handling mode: " << s << ". Valid values are: <";
+    for (size_t i = 0; i < nixl_ucx_err_handling_modes.size(); ++i) {
+        err_msg << ucx_err_mode_to_string(nixl_ucx_err_handling_modes[i]);
+        if (i < nixl_ucx_err_handling_modes.size() - 1) {
+            err_msg << "|";
+        }
+    }
+
+    err_msg << ">";
+    throw std::invalid_argument(err_msg.str());
+}
+
+static void
+err_cb_wrapper(void *arg, ucp_ep_h ucp_ep, ucs_status_t status) {
     nixlUcxEp *ep = reinterpret_cast<nixlUcxEp*>(arg);
     ep->err_cb(ucp_ep, status);
 }
@@ -190,29 +233,6 @@ nixl_status_t nixlUcxEp::disconnect_nb()
 }
 
 /* ===========================================
- * RKey management
- * =========================================== */
-
-int nixlUcxEp::rkeyImport(void* addr, size_t size, nixlUcxRkey &rkey)
-{
-    ucs_status_t status;
-
-    status = ucp_ep_rkey_unpack(eph, addr, &rkey.rkeyh);
-    if (status != UCS_OK)
-    {
-        /* TODO: MSW_NET_ERROR(priv->net, "unable to unpack key!\n"); */
-        return -1;
-    }
-
-    return 0;
-}
-
-void nixlUcxEp::rkeyDestroy(nixlUcxRkey &rkey)
-{
-    ucp_rkey_destroy(rkey.rkeyh);
-}
-
-/* ===========================================
  * Active message handling
  * =========================================== */
 
@@ -221,14 +241,17 @@ nixl_status_t nixlUcxEp::sendAm(unsigned msg_id,
                                 void* buffer, size_t len,
                                 uint32_t flags, nixlUcxReq &req)
 {
-    ucs_status_ptr_t request;
+    nixl_status_t status = checkTxState();
+    if (status != NIXL_SUCCESS) {
+        return status;
+    }
+
     ucp_request_param_t param = {0};
 
     param.op_attr_mask |= UCP_OP_ATTR_FIELD_FLAGS;
     param.flags         = flags;
 
-    request = ucp_am_send_nbx(eph, msg_id, hdr, hdr_len, buffer, len, &param);
-
+    ucs_status_ptr_t request = ucp_am_send_nbx(eph, msg_id, hdr, hdr_len, buffer, len, &param);
     if (UCS_PTR_IS_PTR(request)) {
         req = (void*)request;
         return NIXL_IN_PROG;
@@ -241,10 +264,13 @@ nixl_status_t nixlUcxEp::sendAm(unsigned msg_id,
  * Data transfer
  * =========================================== */
 
-nixl_status_t nixlUcxEp::read(uint64_t raddr, nixlUcxRkey &rk,
-                              void *laddr, nixlUcxMem &mem,
-                              size_t size, nixlUcxReq &req)
-{
+nixl_status_t
+nixlUcxEp::read(uint64_t raddr,
+                const nixl::ucx::rkey &rkey,
+                void *laddr,
+                nixlUcxMem &mem,
+                size_t size,
+                nixlUcxReq &req) {
     nixl_status_t status = checkTxState();
     if (status != NIXL_SUCCESS) {
         return status;
@@ -256,8 +282,7 @@ nixl_status_t nixlUcxEp::read(uint64_t raddr, nixlUcxRkey &rk,
         .memh         = mem.memh,
     };
 
-    ucs_status_ptr_t request = ucp_get_nbx(eph, laddr, size, raddr,
-                                           rk.rkeyh, &param);
+    ucs_status_ptr_t request = ucp_get_nbx(eph, laddr, size, raddr, rkey.get(), &param);
     if (UCS_PTR_IS_PTR(request)) {
         req = (void*)request;
         return NIXL_IN_PROG;
@@ -266,10 +291,13 @@ nixl_status_t nixlUcxEp::read(uint64_t raddr, nixlUcxRkey &rk,
     return ucx_status_to_nixl(UCS_PTR_STATUS(request));
 }
 
-nixl_status_t nixlUcxEp::write(void *laddr, nixlUcxMem &mem,
-                               uint64_t raddr, nixlUcxRkey &rk,
-                               size_t size, nixlUcxReq &req)
-{
+nixl_status_t
+nixlUcxEp::write(void *laddr,
+                 nixlUcxMem &mem,
+                 uint64_t raddr,
+                 const nixl::ucx::rkey &rkey,
+                 size_t size,
+                 nixlUcxReq &req) {
     nixl_status_t status = checkTxState();
     if (status != NIXL_SUCCESS) {
         return status;
@@ -281,8 +309,7 @@ nixl_status_t nixlUcxEp::write(void *laddr, nixlUcxMem &mem,
         .memh         = mem.memh,
     };
 
-    ucs_status_ptr_t request = ucp_put_nbx(eph, laddr, size, raddr,
-                                           rk.rkeyh, &param);
+    ucs_status_ptr_t request = ucp_put_nbx(eph, laddr, size, raddr, rkey.get(), &param);
     if (UCS_PTR_IS_PTR(request)) {
         req = (void*)request;
         return NIXL_IN_PROG;
@@ -356,13 +383,10 @@ nixlUcxContext::nixlUcxContext(std::vector<std::string> devs,
                                nixlUcxContext::req_cb_t init_cb,
                                nixlUcxContext::req_cb_t fini_cb,
                                bool prog_thread,
-                               ucp_err_handling_mode_t __err_handling_mode,
                                unsigned long num_workers,
                                nixl_thread_sync_t sync_mode)
 {
     ucp_params_t ucp_params;
-    ucp_config_t *ucp_config;
-    ucs_status_t status = UCS_OK;
 
     // With strict synchronization model nixlAgent serializes access to backends, with more
     // permissive models backends need to account for concurrent access and ensure their internal
@@ -370,7 +394,6 @@ nixlUcxContext::nixlUcxContext(std::vector<std::string> devs,
     // irrespective of nixlAgent synchronization model.
     mt_type = (sync_mode == nixl_thread_sync_t::NIXL_THREAD_SYNC_RW || prog_thread) ?
         nixl_ucx_mt_t::WORKER : nixl_ucx_mt_t::SINGLE;
-    err_handling_mode = __err_handling_mode;
 
     ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
     ucp_params.features = UCP_FEATURE_RMA | UCP_FEATURE_AMO32 | UCP_FEATURE_AMO64 | UCP_FEATURE_AM;
@@ -393,44 +416,41 @@ nixlUcxContext::nixlUcxContext(std::vector<std::string> devs,
         ucp_params.field_mask |= UCP_PARAM_FIELD_REQUEST_CLEANUP;
     }
 
-    ucp_config_read(NULL, NULL, &ucp_config);
+    nixl::ucx::config config;
 
     /* If requested, restrict the set of network devices */
     if (devs.size()) {
         /* TODO: check if this is the best way */
-        string dev_str = "";
-        unsigned int i;
-        for(i=0; i < devs.size() - 1; i++) {
-            dev_str = dev_str + devs[i] + ":1,";
+        std::string devs_str;
+        for (const auto &dev : devs) {
+            devs_str += dev + ":1,";
         }
-        dev_str = dev_str + devs[i] + ":1";
-        ucp_config_modify(ucp_config, "NET_DEVICES", dev_str.c_str());
+        devs_str.pop_back(); // to remove odd comma after the last device
+        config.modifyAlways ("NET_DEVICES", devs_str.c_str());
     }
 
     unsigned major_version, minor_version, release_number;
     ucp_get_version(&major_version, &minor_version, &release_number);
 
-    ucx_modify_config(ucp_config, "ADDRESS_VERSION", "v2");
-    ucx_modify_config(ucp_config, "RNDV_THRESH", "inf");
+    config.modify ("ADDRESS_VERSION", "v2");
+    config.modify ("RNDV_THRESH", "inf");
 
     unsigned ucp_version = UCP_VERSION(major_version, minor_version);
     if (ucp_version >= UCP_VERSION(1, 19)) {
-        ucx_modify_config(ucp_config, "MAX_COMPONENT_MDS", "32");
+        config.modify ("MAX_COMPONENT_MDS", "32");
     }
 
     if (ucp_version >= UCP_VERSION(1, 20)) {
-        ucx_modify_config(ucp_config, "MAX_RMA_RAILS", "4");
+        config.modify ("MAX_RMA_RAILS", "4");
     } else {
-        ucx_modify_config(ucp_config, "MAX_RMA_RAILS", "2");
+        config.modify ("MAX_RMA_RAILS", "2");
     }
 
-    status = ucp_init(&ucp_params, ucp_config, &ctx);
+    const auto status = ucp_init (&ucp_params, config.getUcpConfig(), &ctx);
     if (status != UCS_OK) {
-        /* TODO: proper cleanup */
-        // TODO: MSW_NET_ERROR(priv->net, "failed to ucp_init(%s)\n", ucs_status_string(status));
-        return;
+        throw std::runtime_error ("Failed to create UCX context: " +
+                                  std::string (ucs_status_string (status)));
     }
-    ucp_config_release(ucp_config);
 }
 
 nixlUcxContext::~nixlUcxContext()
@@ -468,24 +488,22 @@ namespace
 
 }  // namespace
 
-ucp_worker* nixlUcxWorker::createUcpWorker(nixlUcxContext& ctx)
-{
+ucp_worker *
+nixlUcxWorker::createUcpWorker(const nixlUcxContext &ctx) {
     ucp_worker* worker = nullptr;
     const nixlUcpWorkerParams params(ctx.mt_type);
     const ucs_status_t status = ucp_worker_create(ctx.ctx, &params, &worker);
     if(status != UCS_OK) {
-        const auto err_str = std::string("Failed to create UCX worker: ") +
-                             ucs_status_string(status);
-        NIXL_ERROR << err_str;
-        throw std::runtime_error(err_str);  // worker is nullptr -- no leak
+        throw std::runtime_error(std::string("Failed to create UCX worker: ") +
+                                 ucs_status_string(status));
     }
+
     return worker;
 }
 
-nixlUcxWorker::nixlUcxWorker(const std::shared_ptr< nixlUcxContext >&_ctx)
-    : ctx(_ctx),
-      worker(createUcpWorker(*ctx), &ucp_worker_destroy)
-{}
+nixlUcxWorker::nixlUcxWorker(const nixlUcxContext &ctx, ucp_err_handling_mode_t err_handling_mode)
+    : worker(createUcpWorker(ctx), &ucp_worker_destroy),
+      err_handling_mode_(err_handling_mode) {}
 
 std::string nixlUcxWorker::epAddr()
 {
@@ -494,9 +512,10 @@ std::string nixlUcxWorker::epAddr()
     wattr.field_mask = UCP_WORKER_ATTR_FIELD_ADDRESS;
     const ucs_status_t status = ucp_worker_query(worker.get(), &wattr);
     if (UCS_OK != status) {
-        NIXL_WARN << "Unable to query UCX endpoint address";
-        return {};
+        throw std::runtime_error(std::string("Unable to query UCX worker address: ") +
+                                 ucs_status_string(status));
     }
+
     const std::string result = nixlSerDes::_bytesToString(wattr.address, wattr.address_length);
     ucp_worker_release_address(worker.get(), wattr.address);
     return result;
@@ -505,7 +524,7 @@ std::string nixlUcxWorker::epAddr()
 absl::StatusOr<std::unique_ptr<nixlUcxEp>> nixlUcxWorker::connect(void* addr, std::size_t size)
 {
     try {
-        return std::make_unique<nixlUcxEp>(worker.get(), addr, ctx->err_handling_mode);
+        return std::make_unique<nixlUcxEp>(worker.get(), addr, err_handling_mode_);
     } catch (const std::exception &e) {
         return absl::UnavailableError(e.what());
     }
@@ -516,7 +535,7 @@ absl::StatusOr<std::unique_ptr<nixlUcxEp>> nixlUcxWorker::connect(void* addr, st
  * =========================================== */
 
 
-int nixlUcxContext::memReg(void *addr, std::size_t size, nixlUcxMem &mem)
+int nixlUcxContext::memReg(void *addr, size_t size, nixlUcxMem &mem, nixl_mem_t nixl_mem_type)
 {
     //mem.uw = this;
     mem.base = addr;
@@ -530,15 +549,31 @@ int nixlUcxContext::memReg(void *addr, std::size_t size, nixlUcxMem &mem)
         .length  = mem.size,
     };
 
-    const ucs_status_t status = ucp_mem_map(ctx, &mem_params, &mem.memh);
+    ucs_status_t status = ucp_mem_map(ctx, &mem_params, &mem.memh);
     if (status != UCS_OK) {
         /* TODOL: MSW_NET_ERROR(priv->net, "failed to ucp_mem_map (%s)\n", ucs_status_string(status)); */
         return -1;
     }
 
+    if (nixl_mem_type == nixl_mem_t::VRAM_SEG) {
+        ucp_mem_attr_t attr;
+        attr.field_mask = UCP_MEM_ATTR_FIELD_MEM_TYPE;
+        status = ucp_mem_query(mem.memh, &attr);
+        if (status != UCS_OK) {
+            NIXL_ERROR << absl::StrFormat("Failed to ucp_mem_query: %s",
+                                          ucs_status_string(status));
+            ucp_mem_unmap(ctx, mem.memh);
+            return -1;
+        }
+
+        if (attr.mem_type == UCS_MEMORY_TYPE_HOST) {
+            NIXL_WARN << "memory is detected as host, check that UCX is configured"
+                         " with CUDA support";
+        }
+    }
+
     return 0;
 }
-
 
 std::string nixlUcxContext::packRkey(nixlUcxMem &mem)
 {
@@ -558,6 +593,56 @@ std::string nixlUcxContext::packRkey(nixlUcxMem &mem)
 void nixlUcxContext::memDereg(nixlUcxMem &mem)
 {
     ucp_mem_unmap(ctx, mem.memh);
+}
+
+#ifndef HAVE_UCX_GPU_DEVICE_API
+namespace {
+constexpr std::string_view ucxGpuDeviceApiUnsupported{
+    "UCX was not compiled with GPU device API support"};
+}
+#endif
+
+void
+nixlUcxContext::prepGpuSignal([[maybe_unused]] const nixlUcxMem &mem,
+                              [[maybe_unused]] void *signal) const {
+#ifdef HAVE_UCX_GPU_DEVICE_API
+    if (!signal) {
+        throw std::invalid_argument("Signal pointer cannot be null");
+    }
+
+    ucp_device_counter_init_params_t params;
+    params.field_mask = UCP_DEVICE_COUNTER_INIT_PARAMS_FIELD_MEMH;
+    params.memh = mem.memh;
+
+    // Initialize the GPU signal using UCX
+    ucs_status_t status = ucp_device_counter_init(ctx, &params, signal);
+
+    if (status != UCS_OK) {
+        throw std::runtime_error(std::string("Failed to initialize GPU signal: ") +
+                                 ucs_status_string(status));
+    }
+#else
+    throw std::runtime_error(std::string(ucxGpuDeviceApiUnsupported));
+#endif
+}
+
+size_t
+nixlUcxContext::getGpuSignalSize() const {
+#ifdef HAVE_UCX_GPU_DEVICE_API
+    ucp_context_attr_t attr;
+    attr.field_mask = UCP_ATTR_FIELD_DEVICE_COUNTER_SIZE;
+    ucs_status_t query_status = ucp_context_query(ctx, &attr);
+
+    if (query_status != UCS_OK) {
+        throw std::runtime_error(
+            std::string("Failed to query UCX context for device counter size: ") +
+            ucs_status_string(query_status));
+    }
+
+    return attr.device_counter_size;
+#else
+    throw std::runtime_error(std::string(ucxGpuDeviceApiUnsupported));
+#endif
 }
 
 /* ===========================================
@@ -611,4 +696,22 @@ void nixlUcxWorker::reqRelease(nixlUcxReq req)
 void nixlUcxWorker::reqCancel(nixlUcxReq req)
 {
     ucp_request_cancel(worker.get(), req);
+}
+
+nixl_status_t
+nixlUcxWorker::arm() const noexcept {
+    return ucx_status_to_nixl(ucp_worker_arm(worker.get()));
+}
+
+int
+nixlUcxWorker::getEfd() const {
+    int fd;
+    const auto status = ucp_worker_get_efd(worker.get(), &fd);
+    if (status != UCS_OK) {
+        const auto err_str =
+            std::string("Couldn't obtain fd for a worker: ") + ucs_status_string(status);
+        NIXL_ERROR << err_str;
+        throw std::runtime_error(err_str);
+    }
+    return fd;
 }

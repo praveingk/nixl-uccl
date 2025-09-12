@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-project('nixlbench', 'CPP', version: '0.3.1',
+project('nixlbench', 'CPP', version: '0.6.0',
     default_options: ['buildtype=release',
                 'werror=true',
                 'cpp_std=c++17',
@@ -23,6 +23,7 @@ project('nixlbench', 'CPP', version: '0.3.1',
 
 # set up some global vars for compiler, platform, configuration, etc.
 cpp = meson.get_compiler('cpp')
+fs = import('fs')
 
 # Allow overriding paths through environment variables
 # CUDA
@@ -47,7 +48,7 @@ if host_system != 'linux' or host_cpu_family not in ['x86_64', 'aarch64']
     error('This build only supports Linux on x86_64 or aarch64 architectures.')
 endif
 
-nixl_lib_path = nixl_path + '/lib/' + host_cpu_family + '-linux-gnu'
+nixl_lib_path = join_paths(nixl_path, get_option('libdir'))
 nixl_lib = cpp.find_library('nixl', dirs: [nixl_lib_path])
 nixl_build = cpp.find_library('nixl_build', dirs: [nixl_lib_path])
 nixl_serdes = cpp.find_library('serdes', dirs: [nixl_lib_path])
@@ -60,8 +61,28 @@ endif
 cuda_available = false
 if cuda_lib_path == ''
     cuda_dep = dependency('cuda', required : false, modules : [ 'cudart', 'cuda' ])
+    if not cuda_dep.found()
+        # Meson is not detecting CUDA reliably on ARM, fallback to default
+        cuda_home = run_command('bash', '-c', 'echo $CUDA_HOME', check: true).stdout().strip()
+        if cuda_home == ''
+            cuda_home = '/usr/local/cuda'
+        endif
+        cuda_lib = cuda_home + '/lib64'
+        cuda_inc = cuda_home + '/include'
+        cuda_stub = cuda_lib + '/stubs'
+        if fs.exists(cuda_lib) and fs.exists(cuda_inc)
+            cuda_dep = declare_dependency(
+              link_args : ['-L' + cuda_lib, '-L' + cuda_stub, '-lcuda', '-lcudart'],
+              include_directories : include_directories(cuda_inc))
+            if cuda_dep.found()
+                message('Found CUDA installation through fallback method:', cuda_home)
+            endif
+        endif
+    endif
     if cuda_dep.found()
         cuda_available = true
+    else
+        warning('CUDA not found. VRAM support will be disabled.')
     endif
 else
     message('cuda lib path ', cuda_lib_path)
@@ -81,10 +102,6 @@ if cuda_available
         cuda_fabric_available = true
     endif
 endif
-
-
-# UCX
-ucx_dep = dependency('ucx')
 
 # GFlags
 gflags_dep = dependency('gflags', required: true)
@@ -206,7 +223,7 @@ if nvshmem_available
                  ]
 
     if etcd_available
-        nvcc_args += ['-letcd-cpp-api', '-lcpprest']
+        nvcc_args += ['-letcd-cpp-api-core', '-lcpprest']
         etcd_rt = meson.current_build_dir() + '/src/runtime/etcd/libetcd_rt.a.p/etcd_rt.cpp.o'
         nvcc_cmd_files += etcd_rt
     endif

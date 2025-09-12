@@ -14,14 +14,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#ifndef TEST_GTEST_COMMON_H
+#define TEST_GTEST_COMMON_H
 
 #include <iostream>
 #include <iomanip>
 #include <cassert>
+#include <cstdint>
+#include <memory>
 #include <stack>
 #include <optional>
+#include <mutex>
 
 namespace gtest {
+constexpr const char *
+GetMockBackendName() {
+    return "MOCK_BACKEND";
+}
 
 class Logger {
 public:
@@ -37,7 +46,10 @@ public:
 
 class ScopedEnv {
 public:
-    void addVar(const std::string &name, const std::string &value);
+    void
+    addVar(const std::string &name, const std::string &value);
+    void
+    popVar();
 
 private:
     class Variable {
@@ -57,4 +69,39 @@ private:
     std::stack<Variable> m_vars;
 };
 
+class PortAllocator {
+public:
+    static constexpr uint16_t MIN_PORT = 10500;
+    static constexpr uint16_t MAX_PORT = 65535;
+
+private:
+    PortAllocator() = default;
+    ~PortAllocator() = default;
+    PortAllocator(const PortAllocator &other) = delete;
+    void
+    operator=(const PortAllocator &) = delete;
+
+public:
+    static uint16_t
+    next_tcp_port();
+    static PortAllocator &
+    instance();
+
+    void
+    set_min_port(uint16_t min_port);
+    void
+    set_max_port(uint16_t max_port);
+
+private:
+    static bool
+    is_port_available(uint16_t port);
+
+    std::mutex _mutex;
+    uint16_t _port = MIN_PORT;
+    uint16_t _min_port = MIN_PORT;
+    uint16_t _max_port = MAX_PORT;
+};
+
 } // namespace gtest
+
+#endif /* TEST_GTEST_COMMON_H */

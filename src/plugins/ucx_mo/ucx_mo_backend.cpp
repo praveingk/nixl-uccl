@@ -189,7 +189,7 @@ nixlUcxMoEngine::nixlUcxMoEngine(const nixlBackendInitParams* init_params):
     setEngCnt(num_ucx_engines);
     // Initialize required number of engines
     for (uint32_t i = 0; i < getEngCnt(); i++) {
-        auto e = std::make_unique<nixlUcxEngine>(init_params);
+        auto e = nixlUcxEngine::create(*init_params);
         if (e->getInitErr()) {
             this->initErr = true;
             // TODO: Log error
@@ -545,13 +545,9 @@ nixlUcxMoEngine::prepXfer (const nixl_xfer_op_t &operation,
         /* Allocate internal dlists if needed */
         if (!req->dlMatrix[lidx][ridx].in_use) {
             req->dlMatrix[lidx][ridx].in_use = true;
-            req->dlMatrix[lidx][ridx].ldescs = new nixl_meta_dlist_t (
-                                                local.getType(),
-                                                local.isSorted());
+            req->dlMatrix[lidx][ridx].ldescs = new nixl_meta_dlist_t(local.getType());
 
-            req->dlMatrix[lidx][ridx].rdescs = new nixl_meta_dlist_t (
-                                                remote.getType(),
-                                                remote.isSorted());
+            req->dlMatrix[lidx][ridx].rdescs = new nixl_meta_dlist_t(remote.getType());
         }
 
         nixlMetaDesc ldesc = local[i];

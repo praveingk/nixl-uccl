@@ -20,13 +20,103 @@ import numpy as np
 import torch
 
 import nixl._bindings as nixlBind
+from nixl.logging import get_logger
+
+# Get logger using centralized configuration
+logger = get_logger(__name__)
 
 DEFAULT_COMM_PORT = nixlBind.DEFAULT_COMM_PORT
 
-# Opaque nixl handle types
+
+"""
+@brief Opaque handle wrapper for a prepared transfer descriptor list.
+       Use release() to explicitly free resources; __del__ performs best-effort cleanup.
+@param agent Owning nixl_agent used to perform release operations.
+@param value Internal handle
+"""
+
+
+class nixl_prepped_dlist_handle:
+    __slots__ = ("_handle", "_agent", "_released")
+
+    def __init__(self, agent, value: int):
+        self._handle = int(value)
+        self._agent = agent
+        self._released = False
+
+    def __repr__(self) -> str:
+        return (
+            f"nixl_prepped_dlist_handle(0x{self._handle:x}, released={self._released})"
+        )
+
+    def release(self):
+        if not self._released:
+            self._agent.releasedDlistH(self._handle)
+            self._released = True
+
+    def __del__(self):
+        if not self._released:
+            try:
+                self._agent.releasedDlistH(self._handle)
+            except Exception:
+                try:
+                    logger.error(
+                        "nixl_prepped_dlist_handle finalization failed for 0x%x",
+                        self._handle,
+                    )
+                except Exception:
+                    pass
+
+
+"""
+@brief Opaque handle wrapper for a transfer request.
+       Use release() to explicitly free resources. If transfer was not complete, this will initiate
+       the abort process (if available) and will raise an exception.
+       __del__ calls release() and if it fails, it logs the failure and defers release by queuing
+       the handle in leaked xfer handles list, which will be re-released during agent destruction
+@param agent Owning nixl_agent used to perform release operations.
+@param value Internal handle
+"""
+
+
+class nixl_xfer_handle:
+    __slots__ = ("_handle", "_agent", "_released")
+
+    def __init__(self, agent, value: int):
+        self._handle = int(value)
+        self._agent = agent
+        self._released = False
+
+    def __repr__(self) -> str:
+        return f"nixl_xfer_handle(0x{self._handle:x}, released={self._released})"
+
+    def release(self):
+        if not self._released:
+            self._agent.releaseXferReq(self._handle)
+            self._released = True
+
+    def __del__(self):
+        if not self._released:
+            try:
+                self._agent.releaseXferReq(self._handle)
+            except Exception:
+                try:
+                    logger.error(
+                        "nixl_xfer_handle finalization failed for 0x%x; keeping handle alive in agent leak list",
+                        self._handle,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._agent._leaked_xfer_handles.append(self._handle)
+                except Exception:
+                    pass
+                return
+
+
+# Opaque handle for backend can be just int, as it's not passed to the user
 nixl_backend_handle = int
-nixl_prepped_dlist_handle = int
-nixl_xfer_handle = int
+
 
 """
 @brief Configuration class for NIXL agent.
@@ -34,7 +124,8 @@ nixl_xfer_handle = int
 @param enable_prog_thread Whether to enable the progress thread, if available.
 @param enable_listen_thread Whether to enable the listener thread for metadata communication.
 @param listen_port Specify the port for the listener thread to listen on.
-
+@param capture_telemetry Whether to enable telemetry capture.
+@param num_threads Specify number of threads for the supported multi-threaded backends.
 @param backends List of backend names for agent to initialize.
         Default is UCX, other backends can be added to the list, or after
         agent creation, can be initialized with create_backend.
@@ -47,6 +138,8 @@ class nixl_agent_config:
         enable_prog_thread: bool = True,
         enable_listen_thread: bool = False,
         listen_port: int = 0,
+        capture_telemetry: bool = False,
+        num_threads: int = 0,
         backends: list[str] = ["UCX"],
     ):
         # TODO: add backend init parameters
@@ -54,6 +147,8 @@ class nixl_agent_config:
         self.enable_pthread = enable_prog_thread
         self.enable_listen = enable_listen_thread
         self.port = listen_port
+        self.capture_telemetry = capture_telemetry
+        self.num_threads = num_threads
 
 
 """
@@ -76,7 +171,7 @@ class nixl_agent:
     ):
         if nixl_conf and instantiate_all:
             instantiate_all = False
-            print(
+            logger.warning(
                 "Ignoring instantiate_all based on the provided config in agent creation."
             )
         if not nixl_conf:
@@ -94,10 +189,15 @@ class nixl_agent:
             nixl_conf.enable_listen,
             nixl_conf.port,
             thread_config,
+            1,
+            0,
+            100000,
+            nixl_conf.capture_telemetry,
         )
         self.agent = nixlBind.nixlAgent(agent_name, agent_config)
 
         self.name = agent_name
+        self._leaked_xfer_handles: list[int] = []
         self.notifs: dict[str, list[bytes]] = {}
         self.backends: dict[str, nixl_backend_handle] = {}
         self.backend_mems: dict[str, list[str]] = {}
@@ -105,7 +205,7 @@ class nixl_agent:
 
         self.plugin_list = self.agent.getAvailPlugins()
         if len(self.plugin_list) == 0:
-            print("No plugins available, cannot start transfers!")
+            logger.error("No plugins available, cannot start transfers!")
             raise RuntimeError("No plugins available for NIXL, cannot start transfers!")
 
         self.plugin_b_options: dict[str, dict[str, str]] = {}
@@ -115,23 +215,24 @@ class nixl_agent:
             self.plugin_b_options[plugin] = backend_options
             self.plugin_mem_types[plugin] = mem_types
 
-        # TODO: populate init from default parameters, or define a set of params in python
-        init: dict[str, str] = {}
-
         if instantiate_all:
-            for plugin in self.plugin_list:
-                self.create_backend(plugin, init)
-        else:
-            for bknd in nixl_conf.backends:
-                # TODO: populate init from nixl_conf when added
-                if bknd not in self.plugin_list:
-                    print(
-                        "Skipping backend registration",
-                        bknd,
-                        "due to the missing plugin.",
-                    )
-                else:
-                    self.create_backend(bknd, init)
+            nixl_conf.backends = self.plugin_list
+
+        for bknd in nixl_conf.backends:
+            if bknd not in self.plugin_list:
+                logger.warning(
+                    "Skipping backend registration %s due to the missing plugin.",
+                    bknd,
+                )
+            else:
+                # TODO: improve population of init from nixl_conf
+                init: dict[str, str] = {}
+                if nixl_conf.num_threads > 0:
+                    if bknd == "UCX" or bknd == "OBJ":
+                        init["num_threads"] = str(nixl_conf.num_threads)
+                    elif bknd == "GDS_MT":
+                        init["thread_count"] = str(nixl_conf.num_threads)
+                self.create_backend(bknd, init)
 
         self.nixl_mems = {
             "DRAM": nixlBind.DRAM_SEG,
@@ -147,7 +248,22 @@ class nixl_agent:
             "READ": nixlBind.NIXL_READ,
         }
 
-        print("Initialized NIXL agent:", agent_name)
+        logger.info("Initialized NIXL agent: %s", agent_name)
+
+    def __del__(self):
+        # Best-effort cleanup of any leaked xfer handles belonging to this agent
+        if getattr(self, "_leaked_xfer_handles", None):
+            for h in list(self._leaked_xfer_handles):
+                try:
+                    self.releaseXferReq(h)
+                except Exception as e:
+                    try:
+                        logger.error(
+                            "Failed to finalize leaked nixl_xfer_handle 0x%x: %s", h, e
+                        )
+                    except Exception:
+                        pass
+            self._leaked_xfer_handles.clear()
 
     """
     @brief Get the list of available plugins.
@@ -169,7 +285,9 @@ class nixl_agent:
         if backend in self.plugin_mem_types:
             return self.plugin_mem_types[backend]
         else:
-            print("Plugin", backend, "is not available to get its supported mem types.")
+            logger.warning(
+                "Plugin %s is not available to get its supported mem types.", backend
+            )
             return []
 
     """
@@ -184,7 +302,7 @@ class nixl_agent:
         if backend in self.plugin_b_options:
             return self.plugin_b_options[backend]
         else:
-            print("Plugin", backend, "is not available to get its parameters.")
+            logger.warning("Plugin %s is not available to get its parameters.", backend)
             return {}
 
     """
@@ -201,8 +319,8 @@ class nixl_agent:
         if backend in self.backend_mems:
             return self.backend_mems[backend]
         else:
-            print(
-                "Backend", backend, "not instantiated to get its supported mem types."
+            logger.warning(
+                "Backend %s not instantiated to get its supported mem types.", backend
             )
             return []
 
@@ -220,7 +338,9 @@ class nixl_agent:
         if backend in self.backend_options:
             return self.backend_options[backend]
         else:
-            print("Backend", backend, "not instantiated to get its parameters.")
+            logger.warning(
+                "Backend %s not instantiated to get its parameters.", backend
+            )
             return {}
 
     """
@@ -238,14 +358,13 @@ class nixl_agent:
         )
         self.backend_mems[backend] = mem_types
         self.backend_options[backend] = backend_options
-        print("Backend", backend, "was instantiated")
+        logger.info("Backend %s was instantiated", backend)
 
     """
     @brief Register memory regions, optionally with specified backends.
 
     @param reg_list List of either memory regions, tensors, or nixlRegDList to register.
     @param mem_type Optional memory type, necessary if specifying a list of memory regions.
-    @param is_sorted Optional bool for a list of memory regions or tensors for if they are sorted.
     @param backends Optional list of backend names for registration, otherwise NIXL will try to
             register with all backends that support this memory type.
     @return nixlRegDList for the registered memory, can be used with deregister_memory.
@@ -255,10 +374,9 @@ class nixl_agent:
         self,
         reg_list,
         mem_type: Optional[str] = None,
-        is_sorted: bool = False,
         backends: list[str] = [],
     ) -> nixlBind.nixlRegDList:
-        reg_descs = self.get_reg_descs(reg_list, mem_type, is_sorted)
+        reg_descs = self.get_reg_descs(reg_list, mem_type)
 
         handle_list = []
         for backend_string in backends:
@@ -282,6 +400,28 @@ class nixl_agent:
         for backend_string in backends:
             handle_list.append(self.backends[backend_string])
         self.agent.deregisterMem(dereg_list, handle_list)
+
+    """
+    @brief Query information about memory/storage for a specific backend.
+
+    @param reg_list List of either memory regions, tensors, or nixlRegDList to query.
+    @param backend Backend name for querying.
+    @param mem_type Optional memory type, necessary if specifying a list of memory regions.
+    @return List of query results where each item is either None if not found, or a dictionary with the info
+    """
+
+    def query_memory(
+        self, reg_list, backend: str, mem_type: Optional[str] = None
+    ) -> list[Optional[dict[str, str]]]:
+        reg_descs = self.get_reg_descs(reg_list, mem_type)
+
+        # Get the backend handle
+        if backend not in self.backends:
+            raise ValueError(
+                f"Backend '{backend}' not found. Available backends: {list(self.backends.keys())}"
+            )
+
+        return self.agent.queryMem(reg_descs, self.backends[backend])
 
     """
     @brief  Proactively establish a connection with a remote agent,
@@ -317,8 +457,6 @@ class nixl_agent:
     @param xfer_list List of transfer descriptors, can be list of memory region tuples, tensors,
                      Nx3 numpy array, or nixlXferDList. See get_xfer_descs for more details on the structure.
     @param mem_type Optional memory type necessary for list of memory regions.
-    @param is_sorted Optional bool for whether memory region list or tensor list are sorted.
-                     For long lists of transfer descriptors, sorting can speed up transfer preparation.
     @param backends Optional list of backend names to limit which backends are used during preparation
     @return Opaque handle to the prepared transfer descriptor list.
     """
@@ -328,10 +466,9 @@ class nixl_agent:
         agent_name: str,
         xfer_list,
         mem_type: Optional[str] = None,
-        is_sorted: bool = False,
         backends: list[str] = [],
     ) -> nixl_prepped_dlist_handle:
-        descs = self.get_xfer_descs(xfer_list, mem_type, is_sorted)
+        descs = self.get_xfer_descs(xfer_list, mem_type)
 
         if agent_name == "NIXL_INIT_AGENT" or agent_name == "":
             agent_name = nixlBind.NIXL_INIT_AGENT
@@ -341,8 +478,7 @@ class nixl_agent:
             handle_list.append(self.backends[backend_string])
 
         handle = self.agent.prepXferDlist(agent_name, descs, handle_list)
-
-        return handle
+        return nixl_prepped_dlist_handle(self.agent, handle)
 
     """
     @brief Estimate the cost of a transfer operation.
@@ -353,7 +489,7 @@ class nixl_agent:
     """
 
     def estimate_xfer_cost(self, req_handle: nixl_xfer_handle) -> tuple[int, int, int]:
-        duration, err_margin, method = self.agent.estimateXferCost(req_handle)
+        duration, err_margin, method = self.agent.estimateXferCost(req_handle._handle)
         if method == nixlBind.NIXL_COST_ANALYTICAL_BACKEND:
             method = "ANALYTICAL_BACKEND"
         else:
@@ -375,6 +511,7 @@ class nixl_agent:
     @param backends Optional list of backend names to limit which backends NIXL can use.
     @param skip_desc_merge Whether to skip descriptor merging optimization.
     @return Opaque handle for posting/checking transfer.
+            The handle can be released by calling release_xfer_handle from agent, or release() method on itself.
     """
 
     def make_prepped_xfer(
@@ -395,16 +532,16 @@ class nixl_agent:
 
         handle = self.agent.makeXferReq(
             op,
-            local_xfer_side,
+            local_xfer_side._handle,
             local_indices,
-            remote_xfer_side,
+            remote_xfer_side._handle,
             remote_indices,
             notif_msg,
             handle_list,
             skip_desc_merge,
         )
 
-        return handle
+        return nixl_xfer_handle(self.agent, handle)
 
     """
     @brief  Initialize a transfer operation. This is a combined API, to create a transfer request
@@ -421,6 +558,7 @@ class nixl_agent:
            notif_msg should be bytes, as that is what will be returned to the target, but will work with str too.
     @param backends Optional list of backend names to limit which backends NIXL can use.
     @return Opaque handle for posting/checking transfer.
+            The handle can be released by calling release_xfer_handle from agent, or release() method on itself.
     """
 
     def initialize_xfer(
@@ -441,7 +579,7 @@ class nixl_agent:
             op, local_descs, remote_descs, remote_agent, notif_msg, handle_list
         )
 
-        return handle
+        return nixl_xfer_handle(self.agent, handle)
 
     """
     @brief  Initiate a data transfer operation.
@@ -456,7 +594,7 @@ class nixl_agent:
     """
 
     def transfer(self, handle: nixl_xfer_handle, notif_msg: bytes = b"") -> str:
-        status = self.agent.postXferReq(handle, notif_msg)
+        status = self.agent.postXferReq(handle._handle, notif_msg)
         if status == nixlBind.NIXL_SUCCESS:
             return "DONE"
         elif status == nixlBind.NIXL_IN_PROG:
@@ -472,13 +610,29 @@ class nixl_agent:
     """
 
     def check_xfer_state(self, handle: nixl_xfer_handle) -> str:
-        status = self.agent.getXferStatus(handle)
+        status = self.agent.getXferStatus(handle._handle)
         if status == nixlBind.NIXL_SUCCESS:
             return "DONE"
         elif status == nixlBind.NIXL_IN_PROG:
             return "PROC"
         else:
             return "ERR"
+
+    """
+    @brief Get telemetry information of a transfer request.
+           The output object has three time values fields in microseconds
+           (startTime, postDuration, xferDuration), as well as integer totalBytes transferred
+           for the request, and integer descCount representing number of descriptors involved
+           (for example if there was some merging of descriptors).
+
+    @param handle Handle to the transfer operation, from make_prepped_xfer or initialize_xfer.
+    @return nixlXferTelemetry object
+    """
+
+    def get_xfer_telemetry(
+        self, handle: nixl_xfer_handle
+    ) -> nixlBind.nixlXferTelemetry:
+        return self.agent.getXferTelemetry(handle._handle)
 
     """
     @brief Query the backend that was chosen for a transfer operation.
@@ -488,7 +642,7 @@ class nixl_agent:
     """
 
     def query_xfer_backend(self, handle: nixl_xfer_handle) -> str:
-        b_handle = self.agent.queryXferBackend(handle)
+        b_handle = self.agent.queryXferBackend(handle._handle)
         # this works because there should not be multiple matching handles in the Dict
         return next(
             backendS
@@ -505,7 +659,7 @@ class nixl_agent:
     """
 
     def release_xfer_handle(self, handle: nixl_xfer_handle):
-        self.agent.releaseXferReq(handle)
+        handle.release()
 
     """
     @brief Release a descriptor list handle, which internally frees the memory used for the handle.
@@ -514,7 +668,7 @@ class nixl_agent:
     """
 
     def release_dlist_handle(self, handle: nixl_prepped_dlist_handle):
-        self.agent.releasedDlistH(handle)
+        handle.release()
 
     """
     @brief Get new notifications that have come to the agent.
@@ -755,8 +909,6 @@ class nixl_agent:
 
     @param descs List of any of the above types
     @param mem_type Optional memory type necessary for (a).
-    @param is_sorted Optional bool for if the descriptors are sorted for (a) and (c)
-            sort criteria has the comparison order of devID, then addr, then len.
     @return Transfer descriptor list, nixlXferDList.
     """
 
@@ -764,57 +916,57 @@ class nixl_agent:
         self,
         descs,
         mem_type: Optional[str] = None,
-        is_sorted: bool = False,
     ) -> nixlBind.nixlXferDList:
         # can add check for DLPack input
 
         if isinstance(descs, nixlBind.nixlXferDList):
             return descs
         elif isinstance(descs, nixlBind.nixlRegDList):
-            print("RegList type detected for transfer, please use XferList")
+            logger.error("RegList type detected for transfer, please use XferList")
             new_descs = None
         elif isinstance(descs[0], tuple):
             if mem_type is not None and len(descs[0]) == 3:
-                new_descs = nixlBind.nixlXferDList(
-                    self.nixl_mems[mem_type], descs, is_sorted
-                )
+                new_descs = nixlBind.nixlXferDList(self.nixl_mems[mem_type], descs)
             elif mem_type is None:
-                print("Please specify a mem type if not using Tensors")
+                logger.error("Please specify a mem type if not using Tensors")
                 new_descs = None
             else:
-                print("3-tuple list needed for transfer")
+                logger.error("3-tuple list needed for transfer")
                 new_descs = None
         elif isinstance(descs, np.ndarray):
             if mem_type is not None and descs.ndim == 2 and descs.shape[1] == 3:
-                new_descs = nixlBind.nixlXferDList(
-                    self.nixl_mems[mem_type], descs, is_sorted
-                )
+                new_descs = nixlBind.nixlXferDList(self.nixl_mems[mem_type], descs)
             elif mem_type is None:
-                print("Please specify a mem type if not using Tensors")
+                logger.error("Please specify a mem type if not using Tensors")
                 new_descs = None
             else:
-                print(
+                logger.error(
                     "Nx3 shape required for transfer descriptor list from numpy array"
                 )
                 new_descs = None
         elif isinstance(descs, torch.Tensor):
-            mem_type = "cuda" if str(descs.device).startswith("cuda") else "cpu"
-            base_addr = descs.data_ptr()
-            region_len = descs.numel() * descs.element_size()
-            gpu_id = descs.get_device()
-            if gpu_id == -1:  # DRAM
-                gpu_id = 0
-            new_descs = nixlBind.nixlXferDList(
-                self.nixl_mems[mem_type],
-                [(base_addr, region_len, gpu_id)],
-                is_sorted,
-            )
+            if descs.is_contiguous():
+                mem_type = "cuda" if str(descs.device).startswith("cuda") else "cpu"
+                base_addr = descs.data_ptr()
+                region_len = descs.numel() * descs.element_size()
+                gpu_id = descs.get_device()
+                if gpu_id == -1:  # DRAM
+                    gpu_id = 0
+                new_descs = nixlBind.nixlXferDList(
+                    self.nixl_mems[mem_type], [(base_addr, region_len, gpu_id)]
+                )
+            else:
+                logger.error("Please use a list of contiguous Tensors")
+                new_descs = None
         elif isinstance(descs[0], torch.Tensor):  # List[torch.Tensor]:
             tensor_type = descs[0].device
             dlist = np.zeros((len(descs), 3), dtype=np.uint64)
 
             for i in range(len(descs)):
                 if descs[i].device != tensor_type:
+                    return None
+                if not descs[i].is_contiguous():
+                    logger.error("Please use a list of contiguous Tensors")
                     return None
                 base_addr = descs[i].data_ptr()
                 region_len = descs[i].numel() * descs[i].element_size()
@@ -823,9 +975,7 @@ class nixl_agent:
                     gpu_id = 0
                 dlist[i, :] = (base_addr, region_len, gpu_id)
             mem_type = "cuda" if str(tensor_type).startswith("cuda") else "cpu"
-            new_descs = nixlBind.nixlXferDList(
-                self.nixl_mems[mem_type], dlist, is_sorted
-            )
+            new_descs = nixlBind.nixlXferDList(self.nixl_mems[mem_type], dlist)
         else:
             new_descs = None
 
@@ -842,8 +992,6 @@ class nixl_agent:
 
     @param descs List of any of the above types
     @param mem_type Optional memory type necessary for (a).
-    @param is_sorted Optional bool for if the descriptors are sorted for (a) and (c)
-            sort criteria has the comparison order of devID, then addr, then len.
     @return Registration descriptor list, nixlRegDList.
     """
 
@@ -851,57 +999,57 @@ class nixl_agent:
         self,
         descs,
         mem_type: Optional[str] = None,
-        is_sorted: bool = False,
     ) -> nixlBind.nixlRegDList:
         # can add check for DLPack input
 
         if isinstance(descs, nixlBind.nixlRegDList):
             return descs
         elif isinstance(descs, nixlBind.nixlXferDList):
-            print("XferList type detected for registration, please use RegList")
+            logger.error("XferList type detected for registration, please use RegList")
             new_descs = None
         elif isinstance(descs[0], tuple):
             if mem_type is not None and len(descs[0]) == 4:
-                new_descs = nixlBind.nixlRegDList(
-                    self.nixl_mems[mem_type], descs, is_sorted
-                )
+                new_descs = nixlBind.nixlRegDList(self.nixl_mems[mem_type], descs)
             elif mem_type is None:
-                print("Please specify a mem type if not using Tensors")
+                logger.error("Please specify a mem type if not using Tensors")
                 new_descs = None
             else:
-                print("4-tuple list needed for registration")
+                logger.error("4-tuple list needed for registration")
                 new_descs = None
         elif isinstance(descs, np.ndarray):
             if mem_type is not None and descs.ndim == 2 and descs.shape[1] == 3:
-                new_descs = nixlBind.nixlRegDList(
-                    self.nixl_mems[mem_type], descs, is_sorted
-                )
+                new_descs = nixlBind.nixlRegDList(self.nixl_mems[mem_type], descs)
             elif mem_type is None:
-                print("Please specify a mem type if not using Tensors")
+                logger.error("Please specify a mem type if not using Tensors")
                 new_descs = None
             else:
-                print(
+                logger.error(
                     "Nx3 shape required for transfer descriptor list from numpy array"
                 )
                 new_descs = None
         elif isinstance(descs, torch.Tensor):
-            mem_type = "cuda" if str(descs.device).startswith("cuda") else "cpu"
-            base_addr = descs.data_ptr()
-            region_len = descs.numel() * descs.element_size()
-            gpu_id = descs.get_device()
-            if gpu_id == -1:  # DRAM
-                gpu_id = 0
-            new_descs = nixlBind.nixlRegDList(
-                self.nixl_mems[mem_type],
-                [(base_addr, region_len, gpu_id, "")],
-                is_sorted,
-            )
+            if descs.is_contiguous():
+                mem_type = "cuda" if str(descs.device).startswith("cuda") else "cpu"
+                base_addr = descs.data_ptr()
+                region_len = descs.numel() * descs.element_size()
+                gpu_id = descs.get_device()
+                if gpu_id == -1:  # DRAM
+                    gpu_id = 0
+                new_descs = nixlBind.nixlRegDList(
+                    self.nixl_mems[mem_type], [(base_addr, region_len, gpu_id, "")]
+                )
+            else:
+                logger.error("Please use a list of contiguous Tensors")
+                new_descs = None
         elif isinstance(descs[0], torch.Tensor):  # List[torch.Tensor]:
             tensor_type = descs[0].device
             dlist = np.zeros((len(descs), 3), dtype=np.uint64)
 
             for i in range(len(descs)):
                 if descs[i].device != tensor_type:
+                    return None
+                if not descs[i].is_contiguous():
+                    logger.error("Please use a list of contiguous Tensors")
                     return None
                 base_addr = descs[i].data_ptr()
                 region_len = descs[i].numel() * descs[i].element_size()
@@ -910,9 +1058,7 @@ class nixl_agent:
                     gpu_id = 0
                 dlist[i, :] = (base_addr, region_len, gpu_id)
             mem_type = "cuda" if str(tensor_type).startswith("cuda") else "cpu"
-            new_descs = nixlBind.nixlRegDList(
-                self.nixl_mems[mem_type], dlist, is_sorted
-            )
+            new_descs = nixlBind.nixlRegDList(self.nixl_mems[mem_type], dlist)
         else:
             new_descs = None
 

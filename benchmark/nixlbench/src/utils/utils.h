@@ -19,12 +19,14 @@
 #define __UTILS_H
 
 #include "config.h"
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <string>
 #include <variant>
 #include <vector>
 #include <optional>
+#include <utils/common/nixl_time.h>
 #include "runtime/runtime.h"
 
 #if HAVE_CUDA
@@ -55,7 +57,6 @@
 // TODO: This is true for CX-7, need support for other CX cards and NVLink
 #define MAXBW 50.0 // 400 Gbps or 50 GB/sec
 #define LARGE_BLOCK_SIZE (1LL * (1 << 20))
-#define LARGE_BLOCK_SIZE_ITER_FACTOR 16
 
 #define XFERBENCH_INITIATOR_BUFFER_ELEMENT 0xbb
 #define XFERBENCH_TARGET_BUFFER_ELEMENT 0xaa
@@ -67,13 +68,30 @@
 #define XFERBENCH_BACKEND_UCX "UCX"
 #define XFERBENCH_BACKEND_UCX_MO "UCX_MO"
 #define XFERBENCH_BACKEND_GDS "GDS"
+#define XFERBENCH_BACKEND_GDS_MT "GDS_MT"
 #define XFERBENCH_BACKEND_POSIX "POSIX"
 #define XFERBENCH_BACKEND_GPUNETIO "GPUNETIO"
 #define XFERBENCH_BACKEND_MOONCAKE "Mooncake"
+#define XFERBENCH_BACKEND_HF3FS "HF3FS"
+#define XFERBENCH_BACKEND_OBJ "OBJ"
 
 // POSIX API types
 #define XFERBENCH_POSIX_API_AIO "AIO"
 #define XFERBENCH_POSIX_API_URING "URING"
+
+// OBJ S3 scheme types
+#define XFERBENCH_OBJ_SCHEME_HTTP "http"
+#define XFERBENCH_OBJ_SCHEME_HTTPS "https"
+
+// OBJ S3 region types
+#define XFERBENCH_OBJ_REGION_EU_CENTRAL_1 "eu-central-1"
+
+// OBJ S3 bucket names
+#define XFERBENCH_OBJ_BUCKET_NAME_DEFAULT ""
+
+// OBJ S3 required checksum types
+#define XFERBENCH_OBJ_REQ_CHECKSUM_SUPPORTED "supported"
+#define XFERBENCH_OBJ_REQ_CHECKSUM_REQUIRED "required"
 
 // Scheme types for transfer patterns
 #define XFERBENCH_SCHEME_PAIRWISE     "pairwise"
@@ -120,23 +138,104 @@ class xferBenchConfig {
         static size_t start_batch_size;
         static size_t max_batch_size;
         static int num_iter;
+        static int large_blk_iter_ftr;
         static int warmup_iter;
         static int num_threads;
         static bool enable_pt;
+        static size_t progress_threads;
         static std::string device_list;
         static std::string etcd_endpoints;
-        static std::string gds_filepath;
+        static std::string benchmark_group;
+        static std::string filepath;
         static bool enable_vmm;
         static int num_files;
         static std::string posix_api_type;
-        static std::string posix_filepath;
         static bool storage_enable_direct;
         static int gds_batch_pool_size;
         static int gds_batch_limit;
+        static int gds_mt_num_threads;
         static std::string gpunetio_device_list;
-        static int loadFromFlags();
-        static void printConfig();
-        static std::vector<std::string> parseDeviceList();
+        static long page_size;
+        static std::string obj_access_key;
+        static std::string obj_secret_key;
+        static std::string obj_session_token;
+        static std::string obj_bucket_name;
+        static std::string obj_scheme;
+        static std::string obj_region;
+        static bool obj_use_virtual_addressing;
+        static std::string obj_endpoint_override;
+        static std::string obj_req_checksum;
+        static int hf3fs_iopool_size;
+
+        static int
+        loadFromFlags();
+        static void
+        printConfig();
+        static void
+        printOption(const std::string &desc, const std::string &value);
+        static void
+        printSeparator(const char sep = '-');
+        static std::vector<std::string>
+        parseDeviceList();
+        static bool
+        isStorageBackend();
+};
+
+// Timer class for measuring durations at high resolution
+class xferBenchTimer {
+public:
+    xferBenchTimer();
+
+    // Return the elapsed time in microseconds
+    nixlTime::us_t
+    lap();
+
+private:
+    nixlTime::us_t start_;
+};
+
+// Stats class for measuring arbitrary numeric metrics with multiple samples
+class xferMetricStats {
+public:
+    double
+    min() const;
+    double
+    max() const;
+    double
+    avg() const;
+    double
+    p90();
+    double
+    p95();
+    double
+    p99();
+
+    void
+    add(double value);
+    void
+    add(const xferMetricStats &other);
+    void
+    reserve(size_t n);
+    void
+    clear();
+
+private:
+    std::vector<double> samples;
+};
+
+// Stats class for measuring benchmark metrics
+struct xferBenchStats {
+    xferMetricStats total_duration;
+    xferMetricStats prepare_duration;
+    xferMetricStats post_duration;
+    xferMetricStats transfer_duration;
+
+    void
+    clear();
+    void
+    add(const xferBenchStats &other);
+    void
+    reserve(size_t n);
 };
 
 // Generic IOV descriptor class independent of NIXL
@@ -147,12 +246,25 @@ public:
     int devId;
     size_t padded_size;
     unsigned long long handle;
+    std::string metaInfo;
 
-    xferBenchIOV(uintptr_t a, size_t l, int d) :
-        addr(a), len(l), devId(d), padded_size(len), handle(0) {}
+    xferBenchIOV(uintptr_t a, size_t l, int d)
+        : addr(a),
+          len(l),
+          devId(d),
+          padded_size(len),
+          handle(0) {}
 
     xferBenchIOV(uintptr_t a, size_t l, int d, size_t p, unsigned long long h) :
         addr(a), len(l), devId(d), padded_size(p), handle(h) {}
+
+    xferBenchIOV(uintptr_t a, size_t l, int d, std::string m)
+        : addr(a),
+          len(l),
+          devId(d),
+          padded_size(len),
+          handle(0),
+          metaInfo(m) {}
 };
 
 class xferBenchUtils {
@@ -163,11 +275,21 @@ class xferBenchUtils {
         static void setRT(xferBenchRT *rt);
         static void setDevToUse(std::string dev);
         static std::string getDevToUse();
+        static std::string
+        buildAwsCredentials();
+        static bool
+        putObjS3(size_t buffer_size, const std::string &name);
+        static bool
+        getObjS3(const std::string &name);
+        static bool
+        rmObjS3(const std::string &name);
 
-        static void checkConsistency(std::vector<std::vector<xferBenchIOV>> &desc_lists);
-        static void printStatsHeader();
-        static void printStats(bool is_target, size_t block_size, size_t batch_size,
-			                   double total_duration);
+        static void
+        checkConsistency(std::vector<std::vector<xferBenchIOV>> &desc_lists);
+        static void
+        printStatsHeader();
+        static void
+        printStats(bool is_target, size_t block_size, size_t batch_size, xferBenchStats stats);
 };
 
 #endif // __UTILS_H

@@ -121,9 +121,6 @@ class nixlGdsEngine : public nixlBackendEngine {
         bool supportsLocal() const {
             return true;
         }
-        bool supportsProgTh() const {
-            return false;
-        }
 
         nixl_mem_list_t getSupportedMems() const {
             nixl_mem_list_t mems;
@@ -171,5 +168,9 @@ class nixlGdsEngine : public nixlBackendEngine {
 
         nixl_status_t checkXfer(nixlBackendReqH* handle) const;
         nixl_status_t releaseReqH(nixlBackendReqH* handle) const;
+
+        nixl_status_t
+        queryMem(const nixl_reg_dlist_t &descs,
+                 std::vector<nixl_query_resp_t> &resp) const override;
 };
 #endif

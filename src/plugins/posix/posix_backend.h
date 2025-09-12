@@ -81,10 +81,6 @@ public:
         return false;
     }
 
-    bool supportsProgTh() const override {
-        return false;
-    }
-
     nixl_mem_list_t getSupportedMems() const override {
         return {FILE_SEG, DRAM_SEG};
     }
@@ -123,6 +119,9 @@ public:
 
     nixl_status_t checkXfer(nixlBackendReqH* handle) const override;
     nixl_status_t releaseReqH(nixlBackendReqH* handle) const override;
+
+    nixl_status_t
+    queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const override;
 
     nixl_status_t loadLocalMD(nixlBackendMD* input, nixlBackendMD* &output) override {
         output = input;
