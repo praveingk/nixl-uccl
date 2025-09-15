@@ -237,7 +237,7 @@ class nixl_agent:
                         init["thread_count"] = str(nixl_conf.num_threads)
                     elif bknd == "Uccl":
                         init["num_cpus"] = str(nixl_conf.num_cpus)
-                if nixl_config.device_idx > 0:
+                if nixl_conf.device_idx > 0:
                     if bknd == "Uccl":
                         init["device_idx"] = str(nixl_conf.device_idx)
                 self.create_backend(bknd, init)
