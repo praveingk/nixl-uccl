@@ -63,12 +63,33 @@ bool parseConnectionString(const std::string& conn_str, char*& ip_addr, int& por
     return true;
 }
 
+int getNixlParam(const nixl_b_params_t *custom_params, const std::string &key, int default_value) {
+    if (!custom_params) {
+        return default_value;
+    }
+
+    auto it = custom_params->find(key);
+    if (it == custom_params->end()) {
+        return default_value;
+    }
+
+    try {
+        return std::stoi(it->second);
+    } catch (const std::exception&) {
+        return default_value;
+    }
+}
+
 nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
     : nixlBackendEngine(init_params) {
     local_agent_name_ = init_params->localAgent;
-    // TODO: Initialize UCCL engine with appropriate GPU index and CPU count
-    // For now, use fixed values (0, 4). But extend it to all devices
-    engine_ = uccl_engine_create(0, 4);
+    nixl_b_params_t *custom_params = init_params->customParams;
+
+    size_t dev_idx = getNixlParam(custom_params, "device_idx", 0);
+    size_t num_cpus = getNixlParam(custom_params, "num_cpus", 4);
+
+    NIXL_DEBUG << "Creating UCCL Engine for dev:"<<dev_idx<<" num_cpus:"<<num_cpus;
+    engine_ = uccl_engine_create(dev_idx, num_cpus);
     NIXL_DEBUG << "UCCL engine created";
 }
 

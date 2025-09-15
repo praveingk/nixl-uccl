@@ -23,6 +23,7 @@
 #include <string>
 
 #include "nixl.h"
+#include <nixl_types.h>
 #include "backend/backend_engine.h"
 #include "common/nixl_log.h"
 
