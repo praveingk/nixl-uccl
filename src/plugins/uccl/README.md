@@ -1,7 +1,19 @@
-## UCCL Backend Plugin
+## UCCL Backend Plugin [Preview]
 
-This backend implements the NIXL backend interface using the UCCL (Unified Collective Communication Library) transport. It is structured similarly to the Mooncake backend, but all data transfer, memory registration, and connection management are performed using UCCL APIs (see `uccl/p2p/engine.h`).
+[UCCL](https://github.com/uccl-project/uccl) is an efficient communication library to perform GPU memory transfers, with a focus on flexibility (evolving ML workloads) and portability  (heteregenous GPUs).
 
-- Source files: `uccl_backend.h`, `uccl_backend.cpp`, `uccl_plugin.cpp`
-- Build: The plugin is built via Meson as `libplugin_Uccl.so` (or static if configured).
-- Purpose: Allows NIXL to use UCCL as a backend for collective and point-to-point operations.
+## Usage Guide
+1. Build the install UCCL manually. You can refer to the [installation guide here](https://https://github.com/uccl-project/uccl).
+
+    ```cpp
+    git clone https://github.com/uccl-project/uccl.git
+    cd uccl/p2p
+    make -j
+    sudo make install
+    ```
+
+2. Build NIXL.
+
+3. To test the Mooncake backend, you can run the unit test in `test/unit/plugins/mooncake/mooncake_backend_test`.
+
+4. To use the Notify feature, you need to download the latest main branch of Mooncake.

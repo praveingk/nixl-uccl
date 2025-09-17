@@ -336,11 +336,11 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
             return NIXL_ERR_BACKEND;
         }
         // Send the memory region metadata to the remote agent
-        // TODO: Send other params too
-        metadata_t md = metadata_t{
-            .data_ptr = (uint64_t)raddr,
-            .data_size = rsize
-        };
+        md_t md;
+        tx_msg_t tx_data;
+        tx_data.data_ptr = (uint64_t)raddr;
+        tx_data.data_size = rsize;
+    
         switch (operation) {
         case NIXL_READ:
             md.op = UCCL_READ;
@@ -349,12 +349,13 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
             md.op = UCCL_WRITE;
             break;
         }
-        int sock_fd = uccl_engine_get_sock_fd(conn);
-        // Send the message to receiver of where to receive the upcoming data
-        if (sock_fd >= 0) {
-            send(sock_fd, &md, sizeof(metadata_t), 0);
-        }
+        md.data = tx_data;
 
+        result = uccl_engine_send_tx_md(conn, &md);
+        if (result != 0) {
+            NIXL_ERROR << "Failed to send transfer metadata";
+            return NIXL_ERR_BACKEND;
+        }
         if (operation == NIXL_READ) {
             char fifo_item[FIFO_ITEM_SIZE];
             int retry_count = 0;
@@ -520,3 +521,13 @@ nixl_status_t nixlUcclEngine::releaseReqH(nixlBackendReqH* handle) const {
 
     return NIXL_SUCCESS;
 } 
+
+nixl_status_t nixlUcclEngine::getNotifs(notif_list_t &notif_list) {
+
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t nixlUcclEngine::genNotif(const std::string &remote_agent, const std::string &msg) const {
+
+    return NIXL_SUCCESS;
+}
