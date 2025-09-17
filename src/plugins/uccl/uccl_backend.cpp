@@ -340,7 +340,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         tx_msg_t tx_data;
         tx_data.data_ptr = (uint64_t)raddr;
         tx_data.data_size = rsize;
-    
+        
         switch (operation) {
         case NIXL_READ:
             md.op = UCCL_READ;
@@ -349,7 +349,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
             md.op = UCCL_WRITE;
             break;
         }
-        md.data = tx_data;
+        md.data.tx_data = tx_data;
 
         result = uccl_engine_send_tx_md(conn, &md);
         if (result != 0) {
