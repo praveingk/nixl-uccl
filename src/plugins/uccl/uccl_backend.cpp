@@ -340,7 +340,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         tx_msg_t tx_data;
         tx_data.data_ptr = (uint64_t)raddr;
         tx_data.data_size = rsize;
-        
+
         switch (operation) {
         case NIXL_READ:
             md.op = UCCL_READ;
@@ -352,7 +352,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         md.data.tx_data = tx_data;
 
         result = uccl_engine_send_tx_md(conn, &md);
-        if (result != 0) {
+        if (result < 0) {
             NIXL_ERROR << "Failed to send transfer metadata";
             return NIXL_ERR_BACKEND;
         }
