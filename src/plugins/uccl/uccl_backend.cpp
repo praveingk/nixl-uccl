@@ -295,7 +295,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
     int result = 0;
 
     handle = nullptr;
-    NIXL_DEBUG << "PrepXfer: "<<operation<<" remote_agent: "<<remote_agent;
+    NIXL_DEBUG << "UCCL PrepXfer: "<<operation<<" remote_agent: "<<remote_agent;
     // Get the connection for this remote agent
     auto conn_iter = connected_agents_.find(remote_agent);
     if (conn_iter == connected_agents_.end()) {
@@ -523,11 +523,39 @@ nixl_status_t nixlUcclEngine::releaseReqH(nixlBackendReqH* handle) const {
 } 
 
 nixl_status_t nixlUcclEngine::getNotifs(notif_list_t &notif_list) {
+    if (notif_list.size() != 0) return NIXL_ERR_INVALID_PARAM;
+
+    std::vector<notify_msg_t> notify_msgs = uccl_engine_get_notifs();
+    for (size_t i = 0; i < notify_msgs.size(); i++) {
+        notif_list.push_back(std::make_pair(notify_msgs[i].name, notify_msgs[i].msg));
+    }
 
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::genNotif(const std::string &remote_agent, const std::string &msg) const {
+    NIXL_DEBUG << "UCCL Gen Notify: "<<remote_agent<<" msg: "<<msg;
 
+    // Get the connection for this remote agent
+    auto conn_iter = connected_agents_.find(remote_agent);
+    if (conn_iter == connected_agents_.end()) {
+        NIXL_ERROR << "No connection found for remote agent: " << remote_agent;
+        return NIXL_ERR_BACKEND;
+    }
+
+    uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_iter->second);
+    if (!conn) {
+        NIXL_ERROR << "Invalid connection for remote agent: " << remote_agent;
+        return NIXL_ERR_BACKEND;
+    }
+
+    notify_msg_t notify_msg;
+    notify_msg.name = const_cast<char *>(local_agent_name_.c_str());
+    notify_msg.msg = const_cast<char *>(msg.c_str());
+    int result = uccl_engine_send_notif(conn, &notify_msg);
+    if (result < 0) {
+        NIXL_ERROR << "Failed to send notify message";
+        return NIXL_ERR_BACKEND;
+    }
     return NIXL_SUCCESS;
 }
