@@ -22,7 +22,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <chrono>
-#include <thread>
 
 // Parse connection string in format: ip_addr:port?gpu_index
 bool parseConnectionString(const std::string& conn_str, char*& ip_addr, int& port, int& gpu_index) {
@@ -91,6 +90,8 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
     NIXL_DEBUG << "Creating UCCL Engine for dev:"<<dev_idx<<" num_cpus:"<<num_cpus;
     engine_ = uccl_engine_create(dev_idx, num_cpus);
     NIXL_DEBUG << "UCCL engine created";
+    transfer_monitor_thread_ = std::thread(&nixlUcclEngine::transferMonitorThread, this);
+    NIXL_DEBUG << "Started transfer monitoring thread";
 }
 
 nixlUcclEngine::~nixlUcclEngine() {
@@ -123,6 +124,50 @@ nixlUcclEngine::~nixlUcclEngine() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         uccl_engine_destroy(engine_);
         engine_ = nullptr;
+    }
+    stopTransferMonitor();
+}
+
+void nixlUcclEngine::transferMonitorThread() {
+    while (!stop_monitoring_) {
+        {
+            std::lock_guard<std::mutex> lock(monitor_mutex_);
+
+            auto it = pending_handles_.begin();
+            while (it != pending_handles_.end()) {
+                nixlUcclReqH* handle = it->first;
+                std::string notif_msg = it->second;
+                
+                bool all_done = true;
+                for (uint64_t transfer_id : handle->transfer_ids) {
+                    int is_done = uccl_engine_xfer_status(handle->conn, transfer_id);
+                    if (!is_done) {
+                        all_done = false;
+                        break;
+                    }
+                }
+
+                if (all_done) {
+                    notify_msg_t notify_msg;
+                    notify_msg.name = const_cast<char*>(local_agent_name_.c_str());
+                    notify_msg.msg = const_cast<char*>(notif_msg.c_str());
+                    uccl_engine_send_notif(handle->conn, &notify_msg);
+                    NIXL_DEBUG << "All transfers in handle completed, sent notification: " << notif_msg;
+                    it = pending_handles_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void nixlUcclEngine::stopTransferMonitor() {
+    if (transfer_monitor_thread_.joinable()) {
+        stop_monitoring_ = true;
+        transfer_monitor_thread_.join();
     }
 }
 
@@ -386,7 +431,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
 
 nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
     NIXL_DEBUG << "UCCL PostXfer: "<<operation<<" remote_agent: "<<remote_agent;
-
+    nixlUcclReqH* uccl_handle;
     // Get the connection for this remote agent
     auto conn_iter = connected_agents_.find(remote_agent);
     if (conn_iter == connected_agents_.end()) {
@@ -465,11 +510,17 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         if (!handle) {
             handle = new nixlUcclReqH(conn);
         }
-        nixlUcclReqH* uccl_handle = static_cast<nixlUcclReqH*>(handle);
+        uccl_handle = static_cast<nixlUcclReqH*>(handle);
         uccl_handle->transfer_ids.push_back(transfer_id);
         
         NIXL_DEBUG << "Successfully posted " << (operation == NIXL_READ ? "READ" : "WRITE") 
                   << " operation: " << lsize << " bytes with transfer_id: " << transfer_id;
+    }
+    if (opt_args && opt_args->hasNotif) {
+        {
+            std::lock_guard<std::mutex> lock(monitor_mutex_);
+            pending_handles_[uccl_handle] = opt_args->notifMsg;
+        }
     }
 
     return NIXL_IN_PROG;
