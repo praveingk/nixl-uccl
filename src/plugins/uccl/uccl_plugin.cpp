@@ -44,7 +44,7 @@ static const char* get_plugin_version() {
 // Function to get backend options
 static nixl_b_params_t get_backend_options() {
     nixl_b_params_t params;
-    params["uccl_devices"] = "";
+    params["device_idx"] = "";
     return params;
 }
 

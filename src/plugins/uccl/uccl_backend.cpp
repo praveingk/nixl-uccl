@@ -90,8 +90,6 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
     NIXL_DEBUG << "Creating UCCL Engine for dev:"<<dev_idx<<" num_cpus:"<<num_cpus;
     engine_ = uccl_engine_create(dev_idx, num_cpus);
     NIXL_DEBUG << "UCCL engine created";
-    transfer_monitor_thread_ = std::thread(&nixlUcclEngine::transferMonitorThread, this);
-    NIXL_DEBUG << "Started transfer monitoring thread";
 }
 
 nixlUcclEngine::~nixlUcclEngine() {
@@ -124,50 +122,6 @@ nixlUcclEngine::~nixlUcclEngine() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         uccl_engine_destroy(engine_);
         engine_ = nullptr;
-    }
-    stopTransferMonitor();
-}
-
-void nixlUcclEngine::transferMonitorThread() {
-    while (!stop_monitoring_) {
-        {
-            std::lock_guard<std::mutex> lock(monitor_mutex_);
-
-            auto it = pending_handles_.begin();
-            while (it != pending_handles_.end()) {
-                nixlUcclReqH* handle = it->first;
-                std::string notif_msg = it->second;
-                
-                bool all_done = true;
-                for (uint64_t transfer_id : handle->transfer_ids) {
-                    int is_done = uccl_engine_xfer_status(handle->conn, transfer_id);
-                    if (!is_done) {
-                        all_done = false;
-                        break;
-                    }
-                }
-
-                if (all_done) {
-                    notify_msg_t notify_msg;
-                    notify_msg.name = const_cast<char*>(local_agent_name_.c_str());
-                    notify_msg.msg = const_cast<char*>(notif_msg.c_str());
-                    uccl_engine_send_notif(handle->conn, &notify_msg);
-                    NIXL_DEBUG << "All transfers in handle completed, sent notification: " << notif_msg;
-                    it = pending_handles_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
-void nixlUcclEngine::stopTransferMonitor() {
-    if (transfer_monitor_thread_.joinable()) {
-        stop_monitoring_ = true;
-        transfer_monitor_thread_.join();
     }
 }
 
@@ -517,10 +471,7 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
                   << " operation: " << lsize << " bytes with transfer_id: " << transfer_id;
     }
     if (opt_args && opt_args->hasNotif) {
-        {
-            std::lock_guard<std::mutex> lock(monitor_mutex_);
-            pending_handles_[uccl_handle] = opt_args->notifMsg;
-        }
+        uccl_handle->notif_msg= opt_args->notifMsg;
     }
 
     return NIXL_IN_PROG;
@@ -554,6 +505,13 @@ nixl_status_t nixlUcclEngine::checkXfer(nixlBackendReqH* handle) const {
             break;
         }
     }
+    if (all_done && !uccl_handle->notif_msg.empty()) {
+        notify_msg_t notify_msg = {};
+        strncpy(notify_msg.name, local_agent_name_.c_str(), sizeof(notify_msg.name) - 1);
+        strncpy(notify_msg.msg, uccl_handle->notif_msg.c_str(), sizeof(notify_msg.msg) - 1);
+        uccl_engine_send_notif(conn, &notify_msg);
+        NIXL_DEBUG << "All transfers in handle completed, sent notification: " << uccl_handle->notif_msg;
+    }
     NIXL_DEBUG << "Transfer status: " << (all_done ? "COMPLETED" : "IN_PROGRESS");
     return (all_done) ? NIXL_SUCCESS : NIXL_IN_PROG;
 }
@@ -580,7 +538,7 @@ nixl_status_t nixlUcclEngine::getNotifs(notif_list_t &notif_list) {
     for (size_t i = 0; i < notify_msgs.size(); i++) {
         notif_list.push_back(std::make_pair(notify_msgs[i].name, notify_msgs[i].msg));
     }
-
+    
     return NIXL_SUCCESS;
 }
 
@@ -601,8 +559,9 @@ nixl_status_t nixlUcclEngine::genNotif(const std::string &remote_agent, const st
     }
 
     notify_msg_t notify_msg;
-    notify_msg.name = const_cast<char *>(local_agent_name_.c_str());
-    notify_msg.msg = const_cast<char *>(msg.c_str());
+    memset(&notify_msg, 0, sizeof(notify_msg));
+    strncpy(notify_msg.name, local_agent_name_.c_str(), sizeof(notify_msg.name) - 1);
+    strncpy(notify_msg.msg, msg.c_str(), sizeof(notify_msg.msg) - 1);
     int result = uccl_engine_send_notif(conn, &notify_msg);
     if (result < 0) {
         NIXL_ERROR << "Failed to send notify message";

@@ -93,20 +93,12 @@ public:
     nixl_status_t genNotif(const std::string &remote_agent, const std::string &msg) const override;
 
 private:
-    void transferMonitorThread();
-    void stopTransferMonitor();
-
     mutable std::mutex mutex_;
     uccl_engine_t* engine_; 
     bool is_client_;
     std::string local_agent_name_;
     std::unordered_map<uint64_t, nixlUcclBackendMD *> mem_reg_info_;
     std::unordered_map<std::string, uint64_t> connected_agents_; // agent name -> conn_id
-    mutable std::map<nixlUcclReqH*, std::string> pending_handles_; // handle -> notification_msg
-
-    std::thread transfer_monitor_thread_;
-    std::atomic<bool> stop_monitoring_{false};
-    mutable std::mutex monitor_mutex_;
 };
 
 // Minimal metadata struct for UCCL memory registration
@@ -128,6 +120,7 @@ public:
     virtual ~nixlUcclReqH() {}
     uccl_conn_t* conn;
     std::vector<uint64_t> transfer_ids;
+    nixl_blob_t notif_msg;
 };
 
 #endif 
