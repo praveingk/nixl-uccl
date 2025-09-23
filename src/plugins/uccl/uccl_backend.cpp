@@ -113,7 +113,6 @@ nixlUcclEngine::~nixlUcclEngine() {
         uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_id);
         if (conn) {
             NIXL_DEBUG << "Disconnecting from agent: " << agent_name;
-            // Stop listener thread before destroying connection
             uccl_engine_conn_destroy(conn);
         }
     }
@@ -215,8 +214,22 @@ nixl_status_t nixlUcclEngine::connect(const std::string &remote_agent) {
 }
 
 nixl_status_t nixlUcclEngine::disconnect(const std::string &remote_agent) {
-    // Unused
-    return NIXL_SUCCESS;
+    auto conn_iter = connected_agents_.find(remote_agent);
+    if (conn_iter == connected_agents_.end()) {
+        NIXL_ERROR << "No connection found for remote agent: " << remote_agent;
+        return NIXL_ERR_BACKEND;
+    }
+    uccl_conn_t* conn = reinterpret_cast<uccl_conn_t*>(conn_iter->second);
+    if (!conn) {
+        NIXL_ERROR << "Invalid connection for remote agent: " << remote_agent;
+        return NIXL_ERR_BACKEND;
+    }
+
+    if (conn) {
+        NIXL_DEBUG << "Disconnecting from agent: " << agent_name;
+        uccl_engine_conn_destroy(conn);
+    }
+    return NIXL_SUCCESS
 }
 
 nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem, nixlBackendMD* &out) {
@@ -295,7 +308,8 @@ nixl_status_t nixlUcclEngine::loadRemoteMD(const nixlBlobDesc &input, const nixl
 }
 
 nixl_status_t nixlUcclEngine::unloadMD(nixlBackendMD* input) {
-    // No-op for UCCL
+    nixlUcclBackendMD *md = (nixlUcclBackendMD*) input;
+    delete md;
     return NIXL_SUCCESS;
 }
 
