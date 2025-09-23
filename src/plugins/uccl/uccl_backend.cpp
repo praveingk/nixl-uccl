@@ -226,10 +226,10 @@ nixl_status_t nixlUcclEngine::disconnect(const std::string &remote_agent) {
     }
 
     if (conn) {
-        NIXL_DEBUG << "Disconnecting from agent: " << agent_name;
+        NIXL_DEBUG << "Disconnecting from agent: " << remote_agent;
         uccl_engine_conn_destroy(conn);
     }
-    return NIXL_SUCCESS
+    return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem, nixlBackendMD* &out) {
