@@ -47,6 +47,8 @@ public:
     bool supportsNotif() const { return true; }
     bool supportsProgTh() const { return false; }
 
+    void startListener();
+
     nixl_mem_list_t getSupportedMems() const;
 
     nixl_status_t getPublicData(const nixlBackendMD* meta,
@@ -99,6 +101,7 @@ private:
     std::string local_agent_name_;
     std::unordered_map<uint64_t, nixlUcclBackendMD *> mem_reg_info_;
     std::unordered_map<std::string, uint64_t> connected_agents_; // agent name -> conn_id
+    std::thread listener_thread_;
 };
 
 // Minimal metadata struct for UCCL memory registration

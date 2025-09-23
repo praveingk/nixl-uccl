@@ -90,6 +90,8 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams* init_params)
     NIXL_DEBUG << "Creating UCCL Engine for dev:"<<dev_idx<<" num_cpus:"<<num_cpus;
     engine_ = uccl_engine_create(dev_idx, num_cpus);
     NIXL_DEBUG << "UCCL engine created";
+
+    listener_thread_ = std::thread(&nixlUcclEngine::startListener, this);
 }
 
 nixlUcclEngine::~nixlUcclEngine() {
@@ -125,6 +127,22 @@ nixlUcclEngine::~nixlUcclEngine() {
     }
 }
 
+void nixlUcclEngine::startListener() {
+    NIXL_DEBUG << "Accepting UCCL connections";
+    while (true) {
+        char ip_buf[256];
+        int remote_gpu_idx;
+        uccl_conn_t* conn = uccl_engine_accept(engine_, ip_buf, sizeof(ip_buf), &remote_gpu_idx);
+        if (!conn) {
+            NIXL_ERROR << "Failed to accept connection from remote agent";
+            continue;
+        }
+        uccl_engine_start_listener(conn);
+        NIXL_DEBUG<<"Connected to remote agent: "<<ip_buf;
+        connected_agents_[ip_buf] = reinterpret_cast<uint64_t>(conn);
+    }
+}
+
 nixl_mem_list_t nixlUcclEngine::getSupportedMems() const {
     nixl_mem_list_t mems;
     mems.push_back(DRAM_SEG);
@@ -133,8 +151,9 @@ nixl_mem_list_t nixlUcclEngine::getSupportedMems() const {
 }
 
 nixl_status_t nixlUcclEngine::getPublicData(const nixlBackendMD* meta, std::string &str) const {
-    // UCCL does not expose public metadata for memory regions
-    str.clear();
+    nixlUcclBackendMD* priv = (nixlUcclBackendMD* )meta;
+    NIXL_DEBUG << "Getting Public data for : " << priv->addr;
+    str = std::to_string(priv->mr_id);
     return NIXL_SUCCESS;
 }
 
@@ -154,7 +173,6 @@ nixl_status_t nixlUcclEngine::getConnInfo(std::string &str) const {
     NIXL_DEBUG << "UCCL engine metadata: " << str;
     return NIXL_SUCCESS;
 }
-#define MAX_RETRIES 100
 
 nixl_status_t nixlUcclEngine::loadRemoteConnInfo(const std::string &remote_agent, const std::string &remote_conn_info) {
     // Parse remote_conn_info and establish connection using UCCL engine
@@ -172,38 +190,17 @@ nixl_status_t nixlUcclEngine::loadRemoteConnInfo(const std::string &remote_agent
     // Simple role coordination: agent with smaller name acts as client
     is_client_ = local_agent_name_ < remote_agent;
     uccl_conn_t *conn = nullptr;
-    int tries = 0;
 
-    if (is_client_) {
-        // Act as client - connect to remote endpoint
-        NIXL_DEBUG << "Acting as CLIENT, connecting to " << ip_addr << ":" << port << "?gpu=" << gpu_index << std::endl;
-        do {
-            conn = uccl_engine_connect(engine_, ip_addr, gpu_index, port);
-            tries++;
-            if (!conn && tries < MAX_RETRIES) {
-
-            }
-        } while(!conn && tries < MAX_RETRIES);
-
-        if (!conn) {
-            NIXL_ERROR << "Failed to connect to remote agent " << remote_agent << " after " << MAX_RETRIES << " attempts";
-            delete[] ip_addr;
-            return NIXL_ERR_BACKEND;
-        }
-    } else {
-        // Act as server - accept incoming connection
-        NIXL_DEBUG << "Acting as SERVER, accepting connection from " << ip_addr << ":" << port << "?gpu=" << gpu_index << std::endl;
-        char ip_buf[256];
-        int remote_gpu_idx;
-        conn = uccl_engine_accept(engine_, ip_buf, sizeof(ip_buf), &remote_gpu_idx);
-        if (!conn) {
-            NIXL_ERROR << "Failed to accept connection from remote agent " << remote_agent;
-            delete[] ip_addr;
-            return NIXL_ERR_BACKEND;
-        }
+    NIXL_DEBUG << "Acting as CLIENT, connecting to " << ip_addr << ":" << port << "?gpu=" << gpu_index << std::endl;
+    conn = uccl_engine_connect(engine_, ip_addr, gpu_index, port);
+    if (!conn) {
+        NIXL_ERROR << "Failed to connect to remote agent " << remote_agent;
+        delete[] ip_addr;
+        return NIXL_ERR_BACKEND;
     }
+
     NIXL_DEBUG << "Successfully connected to remote agent " << remote_agent;
-    // Start the listener thread for receiving metadata during postXfer
+    // Start the listener thread for notifications
     uccl_engine_start_listener(conn);   
 
     connected_agents_[remote_agent] = reinterpret_cast<uint64_t>(conn);
@@ -227,7 +224,7 @@ nixl_status_t nixlUcclEngine::registerMem(const nixlBlobDesc &mem, const nixl_me
 
     if (mem_reg_info_.count(mem.addr)) {
         auto priv = mem_reg_info_[mem.addr];
-        NIXL_DEBUG << "Registering memory: "<<mem.addr<<" ref_cnt: "<<priv->ref_cnt;
+        NIXL_DEBUG << "Registering memory: "<<mem.addr<<", len:  "<<mem.len;
         priv->ref_cnt++;
         out = priv;
         return NIXL_SUCCESS;
@@ -274,14 +271,26 @@ nixl_status_t nixlUcclEngine::deregisterMem(nixlBackendMD* meta) {
 }
 
 nixl_status_t nixlUcclEngine::loadLocalMD(nixlBackendMD* input, nixlBackendMD* &output) {
-    // No-op for UCCL
-    output = nullptr;
+    nixlUcclBackendMD* input_md = (nixlUcclBackendMD*)input;
+    NIXL_DEBUG << "UCCL Load Local MD: "<<input_md->addr <<"Meta Info:"<< input_md->mr_id;
+
+    nixlUcclBackendMD* output_md = (nixlUcclBackendMD*)output;
+    output_md->addr = (void*)input_md->addr;
+    output_md->length = input_md->length;
+    output_md->ref_cnt = 1;
+    output_md->mr_id = reinterpret_cast<uint64_t>(input_md->mr_id);
     return NIXL_SUCCESS;
 }
 
 nixl_status_t nixlUcclEngine::loadRemoteMD(const nixlBlobDesc &input, const nixl_mem_t &nixl_mem, const std::string &remote_agent, nixlBackendMD* &output) {
-    // No-op for UCCL
-    output = nullptr;
+    NIXL_DEBUG << "UCCL Load Remote MD: "<<input.addr <<"Meta Info:"<< input.metaInfo<<" remote_agent: "<<remote_agent;
+
+    output = new nixlUcclBackendMD(true);
+    nixlUcclBackendMD* output_md = static_cast<nixlUcclBackendMD*>(output);
+    output_md->addr = (void*)input.addr;
+    output_md->length = input.len;
+    output_md->ref_cnt = 1;
+    output_md->mr_id = strtoul(input.metaInfo.c_str(), NULL, 10);
     return NIXL_SUCCESS;
 }
 
@@ -292,7 +301,8 @@ nixl_status_t nixlUcclEngine::unloadMD(nixlBackendMD* input) {
 
 nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
     int result = 0;
-
+    nixlUcclBackendMD *lmd;
+    nixlUcclBackendMD *rmd;
     handle = nullptr;
     NIXL_DEBUG << "UCCL PrepXfer: "<<operation<<" remote_agent: "<<remote_agent;
     // Get the connection for this remote agent
@@ -316,16 +326,16 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
     }
 
     for (size_t i = 0; i < lcnt; i++) {
-        void* laddr = (void*)local[i].addr;
-        size_t lsize = local[i].len;
-        void* raddr = (void*)remote[i].addr;
+        lmd = (nixlUcclBackendMD *) local[i].metadataP;
+        rmd = (nixlUcclBackendMD *) remote[i].metadataP;
         size_t rsize = remote[i].len;
-        
-        NIXL_DEBUG << "Local address: " << laddr << " size: " << lsize << " Remote address: " << raddr << " size: " << rsize;
 
-        auto local_mem_iter = mem_reg_info_.find(local[i].addr);
+        NIXL_DEBUG << "lmd: " <<lmd->addr <<", "<< lmd->mr_id << " rmd: " << rmd->addr <<", "<< rmd->mr_id;
+
+        // Validate the local address is registered
+        auto local_mem_iter = mem_reg_info_.find((uint64_t)lmd->addr);
         if (local_mem_iter == mem_reg_info_.end()) {
-            NIXL_ERROR << "Local memory not registered for address: " << local[i].addr;
+            NIXL_ERROR << "Local memory not registered for address: " << lmd->addr;
             return NIXL_ERR_BACKEND;
         }
 
@@ -337,7 +347,7 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
         // Send the memory region metadata to the remote agent
         md_t md;
         tx_msg_t tx_data;
-        tx_data.data_ptr = (uint64_t)raddr;
+        tx_data.data_ptr = (uint64_t)rmd->addr;
         tx_data.data_size = rsize;
 
         switch (operation) {
@@ -384,8 +394,12 @@ nixl_status_t nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation, const ni
 }
 
 nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const nixl_meta_dlist_t &local, const nixl_meta_dlist_t &remote, const std::string &remote_agent, nixlBackendReqH* &handle, const nixl_opt_b_args_t* opt_args) const {
-    NIXL_DEBUG << "UCCL PostXfer: "<<operation<<" remote_agent: "<<remote_agent;
     nixlUcclReqH* uccl_handle;
+    nixlUcclBackendMD *lmd;
+    nixlUcclBackendMD *rmd;
+
+    NIXL_DEBUG << "UCCL PostXfer: "<<operation<<" remote_agent: "<<remote_agent;
+
     // Get the connection for this remote agent
     auto conn_iter = connected_agents_.find(remote_agent);
     if (conn_iter == connected_agents_.end()) {
@@ -409,23 +423,22 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
 
     // Process each descriptor pair
     for (size_t i = 0; i < lcnt; i++) {
-        void* laddr = (void*)local[i].addr;
+        lmd = (nixlUcclBackendMD *) local[i].metadataP;
+        rmd = (nixlUcclBackendMD *) remote[i].metadataP;
         size_t lsize = local[i].len;
-        void* raddr = (void*)remote[i].addr;
         size_t rsize = remote[i].len;
 
-        NIXL_DEBUG << "Local address: " << laddr << " size: " << lsize << " Remote address: " << raddr << " size: " << rsize;
-        //send the memory region metadata to the remote agent
+        NIXL_DEBUG << "lmd: " <<lmd->addr <<", "<< lmd->mr_id << " rmd: " << rmd->addr <<", "<< rmd->mr_id;
 
         if (lsize != rsize) {
             NIXL_ERROR << "Local and remote sizes don't match: " << lsize << " != " << rsize;
             return NIXL_ERR_INVALID_PARAM;
         }
 
-        // Get local memory region
-        auto local_mem_iter = mem_reg_info_.find(local[i].addr);
+        // Validate the local address is registered
+        auto local_mem_iter = mem_reg_info_.find((uint64_t)lmd->addr);
         if (local_mem_iter == mem_reg_info_.end()) {
-            NIXL_ERROR << "Local memory not registered for address: " << laddr;
+            NIXL_ERROR << "Local memory not registered for address: " << lmd->addr;
             return NIXL_ERR_BACKEND;
         }
 
@@ -443,12 +456,12 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         case NIXL_READ: 
         {
             NIXL_DEBUG << "Performing READ operation: receiving " << lsize << " bytes";
-            result = uccl_engine_read(conn, local_mr, laddr, lsize, local_priv->fifo_item_data, &transfer_id);
+            result = uccl_engine_read(conn, local_mr, rmd->addr, rsize, local_priv->fifo_item_data, &transfer_id);
             break;
         }
         case NIXL_WRITE:
             NIXL_DEBUG << "Performing WRITE operation: sending " << lsize << " bytes";
-            result = uccl_engine_write(conn, local_mr, laddr, lsize, &transfer_id);
+            result = uccl_engine_write(conn, local_mr, rmd->addr, rsize, &transfer_id);
             break;
 
         default:
