@@ -123,6 +123,7 @@ public:
     virtual ~nixlUcclReqH() {}
     uccl_conn_t* conn;
     std::vector<uint64_t> transfer_ids;
+    std::vector<uint64_t> completed_transfer_ids;  // Track completed transfers to avoid double polling
     nixl_blob_t notif_msg;
 };
 

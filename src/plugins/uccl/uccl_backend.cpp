@@ -124,6 +124,11 @@ nixlUcclEngine::~nixlUcclEngine() {
         uccl_engine_destroy(engine_);
         engine_ = nullptr;
     }
+
+    if (listener_thread_.joinable()) {
+        listener_thread_.detach();
+    }
+
 }
 
 void nixlUcclEngine::startListener() {
@@ -470,12 +475,12 @@ nixl_status_t nixlUcclEngine::postXfer(const nixl_xfer_op_t &operation, const ni
         case NIXL_READ: 
         {
             NIXL_DEBUG << "Performing READ operation: receiving " << lsize << " bytes";
-            result = uccl_engine_read(conn, local_mr, rmd->addr, rsize, local_priv->fifo_item_data, &transfer_id);
+            result = uccl_engine_read(conn, local_mr, lmd->addr, lsize, local_priv->fifo_item_data, &transfer_id);
             break;
         }
         case NIXL_WRITE:
             NIXL_DEBUG << "Performing WRITE operation: sending " << lsize << " bytes";
-            result = uccl_engine_write(conn, local_mr, rmd->addr, rsize, &transfer_id);
+            result = uccl_engine_write(conn, local_mr, lmd->addr, lsize, &transfer_id);
             break;
 
         default:
@@ -526,8 +531,16 @@ nixl_status_t nixlUcclEngine::checkXfer(nixlBackendReqH* handle) const {
 
     bool all_done = true;
     for (uint64_t transfer_id : uccl_handle->transfer_ids) {
+        if (std::find(uccl_handle->completed_transfer_ids.begin(),
+                     uccl_handle->completed_transfer_ids.end(),
+                     transfer_id) != uccl_handle->completed_transfer_ids.end()) {
+            continue;
+        }
+
         int is_done = uccl_engine_xfer_status(conn, transfer_id);
-        if (!is_done) {
+        if (is_done) {
+            uccl_handle->completed_transfer_ids.push_back(transfer_id);
+        } else {
             all_done = false;
             break;
         }
