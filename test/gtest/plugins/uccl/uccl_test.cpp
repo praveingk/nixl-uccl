@@ -23,7 +23,7 @@
 
 namespace gtest {
 namespace nixl {
-    constexpr const char* uccl_backend_name = "Uccl";
+    constexpr const char *uccl_backend_name = "Uccl";
 
     static nixlBackendH *
     createUcclBackend(nixlAgent &agent) {
@@ -38,20 +38,20 @@ namespace nixl {
         status = agent.getPluginParams(*it, mems, params);
         EXPECT_EQ(NIXL_SUCCESS, status);
 
-        params.device_id = 0;  // Default GPU device
+        params.device_id = 0; // Default GPU device
 
-        nixlBackendH* backend_handle = nullptr;
+        nixlBackendH *backend_handle = nullptr;
         status = agent.createBackend(*it, params, backend_handle);
         EXPECT_EQ(NIXL_SUCCESS, status);
         EXPECT_NE(nullptr, backend_handle);
         return backend_handle;
     }
 
-    template <typename DListT, typename DescT> void
-    fillRegList(DListT &dlist, DescT &desc, const std::vector<std::byte>& data)
-    {
-        desc.addr  = reinterpret_cast<uintptr_t>(data.data());
-        desc.len   = data.size();
+    template<typename DListT, typename DescT>
+    void
+    fillRegList(DListT &dlist, DescT &desc, const std::vector<std::byte> &data) {
+        desc.addr = reinterpret_cast<uintptr_t>(data.data());
+        desc.len = data.size();
         desc.devId = 0;
         dlist.addDesc(desc);
     }
@@ -62,20 +62,22 @@ class TestUcclBackend : public testing::Test {
         struct MemDesc {
             MemDesc() : m_dlist(DRAM_SEG), m_desc() {}
 
-            void init(nixlBackendH* backend) {
-                m_params = { .backends = {backend} };
+            void
+            init(nixlBackendH *backend) {
+                m_params = {.backends = {backend}};
                 nixl::fillRegList(m_dlist, m_desc, m_data);
             }
 
-            void fillData() {
+            void
+            fillData() {
                 std::fill(m_data.begin(), m_data.end(), std::byte(std::rand()));
             }
 
             static constexpr size_t m_data_size = 256;
-            std::vector<std::byte>  m_data = std::vector<std::byte>(m_data_size);
-            nixl_opt_args_t         m_params;
-            nixl_reg_dlist_t        m_dlist;
-            nixlBlobDesc            m_desc;
+            std::vector<std::byte> m_data = std::vector<std::byte>(m_data_size);
+            nixl_opt_args_t m_params;
+            nixl_reg_dlist_t m_dlist;
+            nixlBlobDesc m_desc;
         };
 
     public:
@@ -84,25 +86,34 @@ class TestUcclBackend : public testing::Test {
 
         void
         destroy();
-        void fillRegList(nixl_xfer_dlist_t& dlist, nixlBasicDesc& desc) const;
-        std::string getLocalMD() const;
-        void loadRemoteMD(const std::string& remote_name);
-        nixl_status_t createXferReq(const nixl_xfer_op_t& op,
-                                    nixl_xfer_dlist_t& sReq_descs,
-                                    nixl_xfer_dlist_t& rReq_descs,
-                                    nixlXferReqH*& req_handle) const;
-        nixl_status_t postXferReq(nixlXferReqH* req_handle) const;
-        nixl_status_t waitForCompletion(nixlXferReqH* req_handle);
-        nixl_status_t waitForNotif(const std::string& expectedNotif);
-        void fillData();
-        bool dataCmp(const Agent& other) const;
+        void
+        fillRegList(nixl_xfer_dlist_t &dlist, nixlBasicDesc &desc) const;
+        std::string
+        getLocalMD() const;
+        void
+        loadRemoteMD(const std::string &remote_name);
+        nixl_status_t
+        createXferReq(const nixl_xfer_op_t &op,
+                      nixl_xfer_dlist_t &sReq_descs,
+                      nixl_xfer_dlist_t &rReq_descs,
+                      nixlXferReqH *&req_handle) const;
+        nixl_status_t
+        postXferReq(nixlXferReqH *req_handle) const;
+        nixl_status_t
+        waitForCompletion(nixlXferReqH *req_handle);
+        nixl_status_t
+        waitForNotif(const std::string &expectedNotif);
+        void
+        fillData();
+        bool
+        dataCmp(const Agent &other) const;
 
     private:
         std::string m_name;
-        nixlBackendH*              m_backend = nullptr;
-        std::unique_ptr<nixlAgent> m_priv    = nullptr;
-        std::string                m_MetaRemote;
-        MemDesc                    m_mem;
+        nixlBackendH *m_backend = nullptr;
+        std::unique_ptr<nixlAgent> m_priv = nullptr;
+        std::string m_MetaRemote;
+        MemDesc m_mem;
     };
 
 protected:
@@ -115,7 +126,9 @@ protected:
     };
 
     TestUcclBackend();
-    template<TestType test_type, enum nixl_xfer_op_t op> void testXfer();
+    template<TestType test_type, enum nixl_xfer_op_t op>
+    void
+    testXfer();
 
 private:
     template<TestType test_type>
@@ -127,22 +140,24 @@ private:
     template<TestType test_type>
     bool
     isFailure(size_t iter);
-    template<TestType test_type> size_t numIter();
+    template<TestType test_type>
+    size_t
+    numIter();
     void
     exchangeMetaData();
     template<TestType test_type>
     std::variant<nixlXferReqH *, nixl_status_t>
     postXfer(enum nixl_xfer_op_t op, size_t iter);
 
-    ScopedEnv    m_env;
-    Agent        m_Initiator;
-    Agent        m_Target;
-    std::string  m_backend_name;
+    ScopedEnv m_env;
+    Agent m_Initiator;
+    Agent m_Target;
+    std::string m_backend_name;
 };
 
 void
 TestUcclBackend::Agent::init(const std::string &name) {
-    m_priv    = std::make_unique<nixlAgent>(name, nixlAgentConfig(true));
+    m_priv = std::make_unique<nixlAgent>(name, nixlAgentConfig(true));
     // Create UCCL backend for testing
     m_backend = nixl::createUcclBackend(*m_priv);
     m_mem.init(m_backend);
@@ -159,32 +174,34 @@ TestUcclBackend::Agent::destroy() {
     m_backend = nullptr;
 }
 
-void TestUcclBackend::Agent::fillRegList(nixl_xfer_dlist_t& dlist,
-                                        nixlBasicDesc& desc) const {
+void
+TestUcclBackend::Agent::fillRegList(nixl_xfer_dlist_t &dlist, nixlBasicDesc &desc) const {
     nixl::fillRegList(dlist, desc, m_mem.m_data);
 }
 
-std::string TestUcclBackend::Agent::getLocalMD() const {
+std::string
+TestUcclBackend::Agent::getLocalMD() const {
     std::string meta;
     EXPECT_EQ(NIXL_SUCCESS, m_priv->getLocalMD(meta));
     return meta;
 }
 
-void TestUcclBackend::Agent::loadRemoteMD(const std::string& remote_name) {
+void
+TestUcclBackend::Agent::loadRemoteMD(const std::string &remote_name) {
     EXPECT_EQ(NIXL_SUCCESS, m_priv->loadRemoteMD(remote_name, m_MetaRemote))
         << "Agent " << m_name << " failed to load remote metadata";
 }
 
 nixl_status_t
-TestUcclBackend::Agent::createXferReq(const nixl_xfer_op_t& op,
-                                     nixl_xfer_dlist_t& sReq_descs,
-                                     nixl_xfer_dlist_t& rReq_descs,
-                                     nixlXferReqH*& req_handle) const {
-    nixl_opt_args_t extra_params = { .backends = {m_backend} };
-    extra_params.notifMsg        = "notification";
-    extra_params.hasNotif        = true;
-    return m_priv->createXferReq(op, sReq_descs, rReq_descs, m_MetaRemote,
-                                 req_handle, &extra_params);
+TestUcclBackend::Agent::createXferReq(const nixl_xfer_op_t &op,
+                                      nixl_xfer_dlist_t &sReq_descs,
+                                      nixl_xfer_dlist_t &rReq_descs,
+                                      nixlXferReqH *&req_handle) const {
+    nixl_opt_args_t extra_params = {.backends = {m_backend}};
+    extra_params.notifMsg = "notification";
+    extra_params.hasNotif = true;
+    return m_priv->createXferReq(
+        op, sReq_descs, rReq_descs, m_MetaRemote, req_handle, &extra_params);
 }
 
 nixl_status_t
@@ -207,7 +224,7 @@ TestUcclBackend::Agent::waitForCompletion(nixlXferReqH *req_handle) {
 }
 
 nixl_status_t
-TestErrorHandling::Agent::waitForNotif(const std::string& expectedNotif) {
+TestErrorHandling::Agent::waitForNotif(const std::string &expectedNotif) {
     nixl_notifs_t notif_map;
 
     do {
@@ -220,11 +237,13 @@ TestErrorHandling::Agent::waitForNotif(const std::string& expectedNotif) {
     return NIXL_SUCCESS;
 }
 
-void TestUcclBackend::Agent::fillData() {
+void
+TestUcclBackend::Agent::fillData() {
     m_mem.fillData();
 }
 
-bool TestUcclBackend::Agent::dataCmp(const TestUcclBackend::Agent& other) const {
+bool
+TestUcclBackend::Agent::dataCmp(const TestUcclBackend::Agent &other) const {
     return m_mem.m_data == other.m_mem.m_data;
 }
 
@@ -234,7 +253,8 @@ TestUcclBackend::TestUcclBackend() {
 }
 
 template<TestUcclBackend::TestType test_type, enum nixl_xfer_op_t op>
-void TestUcclBackend::testXfer() {
+void
+TestUcclBackend::testXfer() {
     const std::string initiator_name = "initiator";
     const std::string target_name = "target";
     m_Initiator.init(initiator_name);
@@ -333,7 +353,8 @@ TestUcclBackend::numIter() {
     }
 }
 
-void TestUcclBackend::exchangeMetaData() {
+void
+TestUcclBackend::exchangeMetaData() {
     m_Initiator.loadRemoteMD(m_Target.getLocalMD());
     m_Target.loadRemoteMD(m_Initiator.getLocalMD());
 }
@@ -351,7 +372,7 @@ TestUcclBackend::postXfer(enum nixl_xfer_op_t op, size_t iter) {
     nixl_xfer_dlist_t rReq_descs(DRAM_SEG);
     m_Target.fillRegList(rReq_descs, rReq_dst);
 
-    nixlXferReqH* req_handle;
+    nixlXferReqH *req_handle;
     nixl_status_t status = m_Initiator.createXferReq(op, sReq_descs, rReq_descs, req_handle);
     EXPECT_EQ(NIXL_SUCCESS, status)
         << "createXferReq failed with unexpected error: " << nixlEnumStrings::statusStr(status);
@@ -374,7 +395,6 @@ TestUcclBackend::postXfer(enum nixl_xfer_op_t op, size_t iter) {
     EXPECT_LE(0, status) << "status: " << nixlEnumStrings::statusStr(status);
     return req_handle;
 }
-
 
 TEST_F(TestUcclBackend, BasicXfer) {
     testXfer<TestType::BASIC_XFER, NIXL_WRITE>();
