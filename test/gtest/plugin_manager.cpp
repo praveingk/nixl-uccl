@@ -40,6 +40,8 @@ const PluginDesc gds_plugin_desc{.name = "GDS",
                                  .type = PluginDesc::PluginType::Real};
 const PluginDesc ucx_mo_plugin_desc{
     .name = "UCX_MO", .type = PluginDesc::PluginType::Real};
+const PluginDesc uccl_plugin_desc{
+      .name = "Uccl", .type = PluginDesc::PluginType::Real};
 
 class LoadSinglePluginTestFixture
     : public testing::TestWithParam<PluginDesc> {
@@ -194,7 +196,9 @@ INSTANTIATE_TEST_SUITE_P(GdsLoadPluginInstantiation,
 INSTANTIATE_TEST_SUITE_P(UcxMoLoadPluginInstantiation,
                          LoadSinglePluginTestFixture,
                          testing::Values(ucx_mo_plugin_desc));
-
+INSTANTIATE_TEST_SUITE_P(UcclLoadPluginInstantiation,
+                          LoadSinglePluginTestFixture,
+                          testing::Values(uccl_plugin_desc));
 /* Load multiple plugins tests instantiations. */
 INSTANTIATE_TEST_SUITE_P(UcxGdsLoadMultiplePluginInstantiation,
                          LoadMultiplePluginsTestFixture,
@@ -210,11 +214,11 @@ INSTANTIATE_TEST_SUITE_P(GdsUcxMoLoadMultiplePluginInstantiation,
                          testing::Values(std::vector<PluginDesc>{
                              gds_plugin_desc,
                              ucx_mo_plugin_desc}));
-INSTANTIATE_TEST_SUITE_P(UcxGdsUcxMoLoadMultiplePluginInstantiation,
+INSTANTIATE_TEST_SUITE_P(UcxGdsUcxMoUcclLoadMultiplePluginInstantiation,
                          LoadMultiplePluginsTestFixture,
                          testing::Values(std::vector<PluginDesc>{
                              ucx_plugin_desc, gds_plugin_desc,
-                             ucx_mo_plugin_desc}));
+                             ucx_mo_plugin_desc, uccl_plugin_desc})); 
 
 } // namespace plugin_manager
 } // namespace gtest

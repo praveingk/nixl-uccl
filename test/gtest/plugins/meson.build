@@ -19,6 +19,8 @@ if not aws_s3.found()
     subdir_done()
 endif
 
+subdir('uccl')
+
 plugins_test_exe = executable('plugins_gtest',
     sources : ['../main.cpp', '../common.cpp', 'obj_plugin.cpp'],
     include_directories: [nixl_inc_dirs, utils_inc_dirs, plugins_inc_dirs, '.'],

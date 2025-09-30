@@ -38,7 +38,6 @@ endif
 
 libuccl_engine = cc.find_library('uccl_engine', required: false)
 if libuccl_engine.found() and not get_option('disable_uccl_backend')
-    message('Found UCCL engine!')
     subdir('uccl')
 endif
 
