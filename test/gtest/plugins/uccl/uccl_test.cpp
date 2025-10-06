@@ -38,8 +38,6 @@ namespace nixl {
         status = agent.getPluginParams(*it, mems, params);
         EXPECT_EQ(NIXL_SUCCESS, status);
 
-        params.device_id = 0; // Default GPU device
-
         nixlBackendH *backend_handle = nullptr;
         status = agent.createBackend(*it, params, backend_handle);
         EXPECT_EQ(NIXL_SUCCESS, status);
@@ -224,7 +222,7 @@ TestUcclBackend::Agent::waitForCompletion(nixlXferReqH *req_handle) {
 }
 
 nixl_status_t
-TestErrorHandling::Agent::waitForNotif(const std::string &expectedNotif) {
+TestUcclBackend::Agent::waitForNotif(const std::string &expectedNotif) {
     nixl_notifs_t notif_map;
 
     do {

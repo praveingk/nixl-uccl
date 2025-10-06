@@ -15,13 +15,21 @@
 
 cpp = meson.get_compiler('cpp')
 
-uccl_engine_lib = cpp.find_library('uccl_engine', dirs: ['/usr/local/lib'], required: true)
-uccl_rdma_lib = cpp.find_library('rdma_plugin', dirs: ['/usr/local/lib'], required: true)
+uccl_engine_lib = cpp.find_library('uccl_engine', dirs: ['/usr/local/lib'], required: false)
+uccl_rdma_lib = cpp.find_library('rdma_plugin', dirs: ['/usr/local/lib'], required: false)
 
-python_dep = dependency('python3', required: true)
-pybind11_dep = dependency('pybind11', required: true)
+if not uccl_engine_lib.found() or not uccl_rdma_lib.found()
+    message('UCCL libraries not found, skipping uccl_gtest build')
+    subdir_done()
+endif
 
-uccl_backend_dep = declare_dependency(link_with: uccl_backend_lib, include_directories: [nixl_inc_dirs, '../../../../src/plugins/uccl'])
+python_dep = dependency('python3', required: false)
+pybind11_dep = dependency('pybind11', required: false)
+
+if not python_dep.found() or not pybind11_dep.found()
+    message('Python dependencies not found, skipping uccl_gtest build')
+    subdir_done()
+endif
 
 cpp_flags = []
 cpp_flags += '-DBUILD_DIR="' + meson.project_build_root() + '"'
@@ -35,24 +43,24 @@ else
 endif
 
 uccl_test_exe = executable('uccl_gtest',
-    sources : ['uccl_test.cpp', '../../common.cpp'],
-    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/uccl', '.'],
+    sources : ['uccl_test.cpp', '../../main.cpp', '../../common.cpp'],
+    include_directories: [nixl_inc_dirs, utils_inc_dirs, gtest_inc_dirs, '.'],
     cpp_args : cpp_flags,
     dependencies : [
         nixl_dep, 
         nixl_infra, 
         nixl_common_deps, 
-        uccl_backend_dep, 
         thread_dep, 
         python_dep, 
         pybind11_dep, 
         uccl_rdma_lib, 
+        uccl_engine_lib,
         gtest_dep, 
         gmock_dep, 
         absl_strings_dep, 
         absl_time_dep
     ] + cuda_dependencies,
-    link_with: [nixl_build_lib, uccl_engine_lib],
+    link_with: [nixl_build_lib],
     install : true
 )
 

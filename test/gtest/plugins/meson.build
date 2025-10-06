@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+subdir('uccl')
+
 aws_s3 = dependency('aws-cpp-sdk-s3', static: false, required: false)
 if not aws_s3.found()
     message('aws-cpp-sdk-s3 not found, skipping plugins_gtest build')
     subdir_done()
 endif
-
-subdir('uccl')
 
 plugins_test_exe = executable('plugins_gtest',
     sources : ['../main.cpp', '../common.cpp', 'obj_plugin.cpp'],
