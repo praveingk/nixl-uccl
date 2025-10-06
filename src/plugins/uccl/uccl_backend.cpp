@@ -377,6 +377,10 @@ nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation,
         return NIXL_ERR_INVALID_PARAM;
     }
 
+    // Collect all tx_data into vectors for batch sending
+    std::vector<md_t> md_vector;
+    std::vector<nixlUcclBackendMD*> local_priv_vector;
+    
     for (size_t i = 0; i < lcnt; i++) {
         lmd = (nixlUcclBackendMD *)local[i].metadataP;
         rmd = (nixlUcclBackendMD *)remote[i].metadataP;
@@ -397,7 +401,8 @@ nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation,
             NIXL_ERROR << "Local memory region not properly registered";
             return NIXL_ERR_BACKEND;
         }
-        // Send the memory region metadata to the remote agent
+
+        // Prepare the memory region metadata for batch sending
         md_t md;
         tx_msg_t tx_data;
         tx_data.data_ptr = (uint64_t)rmd->addr;
@@ -413,33 +418,42 @@ nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation,
         }
         md.data.tx_data = tx_data;
 
-        result = uccl_engine_send_tx_md(conn, &md);
-        if (result < 0) {
-            NIXL_ERROR << "Failed to send transfer metadata";
-            return NIXL_ERR_BACKEND;
-        }
-        if (operation == NIXL_READ) {
+        // Add to vectors for batch processing
+        md_vector.push_back(md);
+        local_priv_vector.push_back(local_priv);
+    }
+
+    // Send all tx_data as a vector
+    result = uccl_engine_send_tx_md_vector(conn, md_vector.data(), md_vector.size());
+    if (result < 0) {
+        NIXL_ERROR << "Failed to send transfer metadata vector";
+        return NIXL_ERR_BACKEND;
+    }
+
+    // Get FIFO items one by one for READ operations
+    if (operation == NIXL_READ) {
+        for (size_t i = 0; i < local_priv_vector.size(); i++) {
             char fifo_item[FIFO_ITEM_SIZE];
             int retry_count = 0;
             const int max_retries = 5;
             do {
-                result = uccl_engine_get_fifo_item(conn, &fifo_item);
+                result = uccl_engine_get_fifo_item(conn, i, &fifo_item);
                 if (result == 0) {
                     // Successfully got fifo_item
-                    NIXL_DEBUG << "Got the FIFO item to perform read operation";
-                    memcpy(local_priv->fifo_item_data, fifo_item, FIFO_ITEM_SIZE);
+                    NIXL_DEBUG << "Got the FIFO item to perform read operation for item " << i;
+                    memcpy(local_priv_vector[i]->fifo_item_data, fifo_item, FIFO_ITEM_SIZE);
                     break;
                 }
                 retry_count++;
                 if (retry_count < max_retries) {
                     NIXL_DEBUG << "Failed to get FIFO item, retry " << retry_count << "/"
-                               << max_retries;
+                               << max_retries << " for item " << i;
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             } while (retry_count < max_retries);
 
             if (result != 0) {
-                NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries";
+                NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries for item " << i;
                 return NIXL_ERR_BACKEND;
             }
         }
