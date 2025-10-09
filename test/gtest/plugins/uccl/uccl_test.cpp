@@ -16,6 +16,8 @@
  */
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <gtest/gtest.h>
 #include <nixl_types.h>
 #include "common.h"
@@ -37,7 +39,7 @@ namespace nixl {
         nixl_mem_list_t mems;
         status = agent.getPluginParams(*it, mems, params);
         EXPECT_EQ(NIXL_SUCCESS, status);
-
+        params["in_python"] = "0";
         nixlBackendH *backend_handle = nullptr;
         status = agent.createBackend(*it, params, backend_handle);
         EXPECT_EQ(NIXL_SUCCESS, status);
@@ -253,8 +255,12 @@ TestUcclBackend::TestUcclBackend() {
 template<TestUcclBackend::TestType test_type, enum nixl_xfer_op_t op>
 void
 TestUcclBackend::testXfer() {
+    if (op == NIXL_READ) {
+        m_env.addVar("UCCL_RCMODE", "1");
+    }
     const std::string initiator_name = "initiator";
     const std::string target_name = "target";
+    
     m_Initiator.init(initiator_name);
     m_Target.init(target_name);
 
@@ -354,7 +360,6 @@ TestUcclBackend::numIter() {
 void
 TestUcclBackend::exchangeMetaData() {
     m_Initiator.loadRemoteMD(m_Target.getLocalMD());
-    m_Target.loadRemoteMD(m_Initiator.getLocalMD());
 }
 
 template<TestUcclBackend::TestType test_type>
@@ -395,28 +400,29 @@ TestUcclBackend::postXfer(enum nixl_xfer_op_t op, size_t iter) {
 }
 
 TEST_F(TestUcclBackend, BasicXfer) {
-    testXfer<TestType::BASIC_XFER, NIXL_WRITE>();
     testXfer<TestType::BASIC_XFER, NIXL_READ>();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    testXfer<TestType::BASIC_XFER, NIXL_WRITE>();
 }
 
-// TEST_F(TestErrorHandling, LoadRemoteThenFail) {
-//     testXfer<TestType::LOAD_REMOTE_THEN_FAIL, NIXL_WRITE>();
-//     testXfer<TestType::LOAD_REMOTE_THEN_FAIL, NIXL_READ>();
-// }
+TEST_P(TestErrorHandling, LoadRemoteThenFail) {
+    testXfer<TestType::LOAD_REMOTE_THEN_FAIL, NIXL_WRITE>();
+    testXfer<TestType::LOAD_REMOTE_THEN_FAIL, NIXL_READ>();
+}
 
-// TEST_F(TestErrorHandling, XferThenFail) {
-//     testXfer<TestType::XFER_THEN_FAIL, NIXL_WRITE>();
-//     testXfer<TestType::XFER_THEN_FAIL, NIXL_READ>();
-// }
+TEST_P(TestErrorHandling, XferThenFail) {
+    testXfer<TestType::XFER_THEN_FAIL, NIXL_WRITE>();
+    testXfer<TestType::XFER_THEN_FAIL, NIXL_READ>();
+}
 
-// TEST_F(TestErrorHandling, XferFailRestore) {
-//     testXfer<TestType::XFER_FAIL_RESTORE, NIXL_WRITE>();
-//     testXfer<TestType::XFER_FAIL_RESTORE, NIXL_READ>();
-// }
+TEST_P(TestErrorHandling, XferFailRestore) {
+    testXfer<TestType::XFER_FAIL_RESTORE, NIXL_WRITE>();
+    testXfer<TestType::XFER_FAIL_RESTORE, NIXL_READ>();
+}
 
-// TEST_F(TestErrorHandling, XferPostThenFail) {
-//     testXfer<TestType::FAIL_AFTER_POST, NIXL_WRITE>();
-//     testXfer<TestType::FAIL_AFTER_POST, NIXL_READ>();
-// }
+TEST_P(TestErrorHandling, XferPostThenFail) {
+    testXfer<TestType::FAIL_AFTER_POST, NIXL_WRITE>();
+    testXfer<TestType::FAIL_AFTER_POST, NIXL_READ>();
+}
 
 } // namespace gtest

@@ -18,6 +18,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -91,7 +92,7 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams *init_params)
 
     size_t dev_idx = getNixlParam(custom_params, "device_idx", 0);
     size_t num_cpus = getNixlParam(custom_params, "num_cpus", 4);
-
+    bool in_python = getNixlParam(custom_params, "in_python", 1);
     NIXL_DEBUG << "Creating UCCL Engine for dev:" << dev_idx << " num_cpus:" << num_cpus;
     engine_ = uccl_engine_create(dev_idx, num_cpus);
     NIXL_DEBUG << "UCCL engine created";
@@ -115,11 +116,15 @@ nixlUcclEngine::~nixlUcclEngine() {
         }
         mem_reg_info_.clear();
     }
+    std::set<std::string> destroyed_agents;
     for (auto &[agent_name, conn_id] : connected_agents_) {
-        uccl_conn_t *conn = reinterpret_cast<uccl_conn_t *>(conn_id);
-        if (conn) {
-            NIXL_DEBUG << "Disconnecting from agent: " << agent_name;
-            uccl_engine_conn_destroy(conn);
+        if (destroyed_agents.find(agent_name) == destroyed_agents.end()) {
+            uccl_conn_t *conn = reinterpret_cast<uccl_conn_t *>(conn_id);
+            if (conn) {
+                NIXL_DEBUG << "Disconnecting from agent: " << agent_name;
+                uccl_engine_conn_destroy(conn);
+                destroyed_agents.insert(agent_name);
+            }
         }
     }
 
@@ -248,6 +253,7 @@ nixlUcclEngine::disconnect(const std::string &remote_agent) {
     if (conn) {
         NIXL_DEBUG << "Disconnecting from agent: " << remote_agent;
         uccl_engine_conn_destroy(conn);
+        connected_agents_.erase(remote_agent);
     }
     return NIXL_SUCCESS;
 }
