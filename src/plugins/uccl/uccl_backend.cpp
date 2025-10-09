@@ -92,9 +92,9 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams *init_params)
 
     size_t dev_idx = getNixlParam(custom_params, "device_idx", 0);
     size_t num_cpus = getNixlParam(custom_params, "num_cpus", 4);
-    bool in_python = getNixlParam(custom_params, "in_python", 1);
+    int in_python = getNixlParam(custom_params, "in_python", 1);
     NIXL_DEBUG << "Creating UCCL Engine for dev:" << dev_idx << " num_cpus:" << num_cpus;
-    engine_ = uccl_engine_create(dev_idx, num_cpus);
+    engine_ = uccl_engine_create(dev_idx, num_cpus, (in_python==1));
     NIXL_DEBUG << "UCCL engine created";
 
     listener_thread_ = std::thread(&nixlUcclEngine::startListener, this);
