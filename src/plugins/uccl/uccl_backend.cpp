@@ -94,7 +94,7 @@ nixlUcclEngine::nixlUcclEngine(const nixlBackendInitParams *init_params)
     size_t num_cpus = getNixlParam(custom_params, "num_cpus", 4);
     int in_python = getNixlParam(custom_params, "in_python", 1);
     NIXL_DEBUG << "Creating UCCL Engine for dev:" << dev_idx << " num_cpus:" << num_cpus;
-    engine_ = uccl_engine_create(dev_idx, num_cpus, (in_python==1));
+    engine_ = uccl_engine_create(dev_idx, num_cpus, (in_python == 1));
     NIXL_DEBUG << "UCCL engine created";
 
     listener_thread_ = std::thread(&nixlUcclEngine::startListener, this);
@@ -385,8 +385,8 @@ nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation,
 
     // Collect all tx_data into vectors for batch sending
     std::vector<md_t> md_vector;
-    std::vector<nixlUcclBackendMD*> local_priv_vector;
-    
+    std::vector<nixlUcclBackendMD *> local_priv_vector;
+
     for (size_t i = 0; i < lcnt; i++) {
         lmd = (nixlUcclBackendMD *)local[i].metadataP;
         rmd = (nixlUcclBackendMD *)remote[i].metadataP;
@@ -459,7 +459,8 @@ nixlUcclEngine::prepXfer(const nixl_xfer_op_t &operation,
             } while (retry_count < max_retries);
 
             if (result != 0) {
-                NIXL_ERROR << "Failed to get FIFO item after " << max_retries << " retries for item " << i;
+                NIXL_ERROR << "Failed to get FIFO item after " << max_retries
+                           << " retries for item " << i;
                 return NIXL_ERR_BACKEND;
             }
         }

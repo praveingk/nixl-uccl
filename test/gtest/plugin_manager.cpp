@@ -206,9 +206,8 @@ INSTANTIATE_TEST_SUITE_P(UcxUcxMoLoadMultiplePluginInstantiation,
                              ucx_mo_plugin_desc}));
 INSTANTIATE_TEST_SUITE_P(GdsUcxMoLoadMultiplePluginInstantiation,
                          LoadMultiplePluginsTestFixture,
-                         testing::Values(std::vector<PluginDesc>{
-                             gds_plugin_desc,
-                             ucx_mo_plugin_desc}));
+                         testing::Values(std::vector<PluginDesc>{gds_plugin_desc,
+                                                                 ucx_mo_plugin_desc}));
 
 } // namespace plugin_manager
 } // namespace gtest

@@ -260,7 +260,7 @@ TestUcclBackend::testXfer() {
     }
     const std::string initiator_name = "initiator";
     const std::string target_name = "target";
-    
+
     m_Initiator.init(initiator_name);
     m_Target.init(target_name);
 
