@@ -360,6 +360,7 @@ TestUcclBackend::numIter() {
 void
 TestUcclBackend::exchangeMetaData() {
     m_Initiator.loadRemoteMD(m_Target.getLocalMD());
+    m_target.loadRemoteMD(m_Initiator.getLocalMD());
 }
 
 template<TestUcclBackend::TestType test_type>
