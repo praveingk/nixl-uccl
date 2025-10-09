@@ -405,22 +405,22 @@ TEST_F(TestUcclBackend, BasicXfer) {
     testXfer<TestType::BASIC_XFER, NIXL_WRITE>();
 }
 
-TEST_P(TestErrorHandling, LoadRemoteThenFail) {
+TEST_P(TestUcclBackend, LoadRemoteThenFail) {
     testXfer<TestType::LOAD_REMOTE_THEN_FAIL, NIXL_WRITE>();
     testXfer<TestType::LOAD_REMOTE_THEN_FAIL, NIXL_READ>();
 }
 
-TEST_P(TestErrorHandling, XferThenFail) {
+TEST_P(TestUcclBackend, XferThenFail) {
     testXfer<TestType::XFER_THEN_FAIL, NIXL_WRITE>();
     testXfer<TestType::XFER_THEN_FAIL, NIXL_READ>();
 }
 
-TEST_P(TestErrorHandling, XferFailRestore) {
+TEST_P(TestUcclBackend, XferFailRestore) {
     testXfer<TestType::XFER_FAIL_RESTORE, NIXL_WRITE>();
     testXfer<TestType::XFER_FAIL_RESTORE, NIXL_READ>();
 }
 
-TEST_P(TestErrorHandling, XferPostThenFail) {
+TEST_P(TestUcclBackend, XferPostThenFail) {
     testXfer<TestType::FAIL_AFTER_POST, NIXL_WRITE>();
     testXfer<TestType::FAIL_AFTER_POST, NIXL_READ>();
 }
